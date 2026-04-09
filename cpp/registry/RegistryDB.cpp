@@ -252,6 +252,25 @@ void RegistryDB::processLogEntries(std::vector<LogsDBLogEntry>& logEntries, std:
                 StaticValue<LastHeartBeatKey> lastHeartBeat;
                 shardToLastHeartBeat(info, lastHeartBeat());
                 writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+                if (!info.isLeader && req.isLeader) {
+                    for (ReplicaId r = 0; r.u8 < LogsDB::REPLICA_COUNT; ++r.u8) {
+                        if (r == req.shrid.replicaId()) continue;
+                        StaticValue<ShardInfoKey> otherKey;
+                        otherKey().setLocationId(req.location);
+                        otherKey().setShardId(req.shrid.shardId().u8);
+                        otherKey().setReplicaId(r);
+                        std::string otherValue;
+                        auto otherStatus = _db->Get({}, _shardsCf, otherKey.toSlice(), &otherValue);
+                        if (otherStatus == rocksdb::Status::NotFound()) continue;
+                        ROCKS_DB_CHECKED(otherStatus);
+                        FullShardInfo otherInfo;
+                        readShardInfo(otherKey.toSlice(), otherValue, otherInfo);
+                        if (otherInfo.isLeader) {
+                            otherInfo.isLeader = false;
+                            writeShardInfo(writeBatch, _shardsCf, otherInfo);
+                        }
+                    }
+                }
                 info.isLeader = req.isLeader;
                 info.addrs = req.addrs;
                 info.lastSeen = requestTime;
@@ -286,6 +305,24 @@ void RegistryDB::processLogEntries(std::vector<LogsDBLogEntry>& logEntries, std:
                 StaticValue<LastHeartBeatKey> lastHeartBeat;
                 cdcToLastHeartBeat(info, lastHeartBeat());
                 writeBatch.Delete(_lastHeartBeatCf, lastHeartBeat.toSlice());
+                if (!info.isLeader && req.isLeader) {
+                    for (ReplicaId r = 0; r.u8 < LogsDB::REPLICA_COUNT; ++r.u8) {
+                        if (r == req.replica) continue;
+                        StaticValue<CdcInfoKey> otherKey;
+                        otherKey().setLocationId(req.location);
+                        otherKey().setReplicaId(r);
+                        std::string otherValue;
+                        auto otherStatus = _db->Get({}, _cdcCf, otherKey.toSlice(), &otherValue);
+                        if (otherStatus == rocksdb::Status::NotFound()) continue;
+                        ROCKS_DB_CHECKED(otherStatus);
+                        CdcInfo otherInfo;
+                        readCdcInfo(otherKey.toSlice(), otherValue, otherInfo);
+                        if (otherInfo.isLeader) {
+                            otherInfo.isLeader = false;
+                            writeCdcInfo(writeBatch, _cdcCf, otherInfo);
+                        }
+                    }
+                }
                 info.isLeader = req.isLeader;
                 info.addrs = req.addrs;
                 info.lastSeen = requestTime;
@@ -499,6 +536,23 @@ void RegistryDB::processLogEntries(std::vector<LogsDBLogEntry>& logEntries, std:
                 ROCKS_DB_CHECKED(status);
                 FullShardInfo info;
                 readShardInfo(key.toSlice(), value, info);
+                for (ReplicaId r = 0; r.u8 < LogsDB::REPLICA_COUNT; ++r.u8) {
+                    if (r == req.shrid.replicaId()) continue;
+                    StaticValue<ShardInfoKey> otherKey;
+                    otherKey().setLocationId(req.location);
+                    otherKey().setShardId(req.shrid.shardId().u8);
+                    otherKey().setReplicaId(r);
+                    std::string otherValue;
+                    auto otherStatus = _db->Get({}, _shardsCf, otherKey.toSlice(), &otherValue);
+                    if (otherStatus == rocksdb::Status::NotFound()) continue;
+                    ROCKS_DB_CHECKED(otherStatus);
+                    FullShardInfo otherInfo;
+                    readShardInfo(otherKey.toSlice(), otherValue, otherInfo);
+                    if (otherInfo.isLeader) {
+                        otherInfo.isLeader = false;
+                        writeShardInfo(writeBatch, _shardsCf, otherInfo);
+                    }
+                }
                 info.isLeader = true;
                 writeShardInfo(writeBatch, _shardsCf, info);
                 break;
@@ -539,6 +593,22 @@ void RegistryDB::processLogEntries(std::vector<LogsDBLogEntry>& logEntries, std:
                 ROCKS_DB_CHECKED(status);
                 CdcInfo info;
                 readCdcInfo(key.toSlice(), value, info);
+                for (ReplicaId r = 0; r.u8 < LogsDB::REPLICA_COUNT; ++r.u8) {
+                    if (r == req.replica) continue;
+                    StaticValue<CdcInfoKey> otherKey;
+                    otherKey().setLocationId(req.location);
+                    otherKey().setReplicaId(r);
+                    std::string otherValue;
+                    auto otherStatus = _db->Get({}, _cdcCf, otherKey.toSlice(), &otherValue);
+                    if (otherStatus == rocksdb::Status::NotFound()) continue;
+                    ROCKS_DB_CHECKED(otherStatus);
+                    CdcInfo otherInfo;
+                    readCdcInfo(otherKey.toSlice(), otherValue, otherInfo);
+                    if (otherInfo.isLeader) {
+                        otherInfo.isLeader = false;
+                        writeCdcInfo(writeBatch, _cdcCf, otherInfo);
+                    }
+                }
                 info.isLeader = true;
                 writeCdcInfo(writeBatch, _cdcCf, info);
                 break;

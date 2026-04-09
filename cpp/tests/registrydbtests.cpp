@@ -1108,3 +1108,247 @@ TEST_CASE("ShardBlockServiceAssignment") {
     }
 }
 
+TEST_CASE("ShardLeaderClearsOtherReplicas") {
+    RegistryOptions options;
+    TempRegistryDB db(LogLevel::LOG_ERROR);
+    db.open(options);
+
+    std::vector<LogsDBLogEntry> logEntries;
+    std::vector<RegistryDBWriteResult> writeResults;
+    AddrsInfo addrsInfo;
+    parseIpv4Addr("1.2.3.4:8080", addrsInfo.addrs[0]);
+
+    auto loc2 = LocationId(42);
+
+    // Create second location
+    {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+        auto& req = reqContainer.setCreateLocation();
+        req.id = loc2;
+        req.name = "loc2";
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    db->processLogEntries(logEntries, writeResults);
+    REQUIRE(writeResults.size() == 1);
+    CHECK(writeResults[0].err == TernError::NO_ERROR);
+
+    // Register shard replica 0 (shardId=1) as leader in both locations
+    logEntries.clear();
+    writeResults.clear();
+    {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        {
+            auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+            auto& req = reqContainer.setRegisterShard();
+            req.location = DEFAULT_LOCATION;
+            req.shrid = ShardReplicaId(ShardId(1), ReplicaId(0));
+            req.isLeader = true;
+            req.addrs = addrsInfo;
+        }
+        {
+            auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+            auto& req = reqContainer.setRegisterShard();
+            req.location = loc2;
+            req.shrid = ShardReplicaId(ShardId(1), ReplicaId(0));
+            req.isLeader = true;
+            req.addrs = addrsInfo;
+        }
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    db->processLogEntries(logEntries, writeResults);
+    REQUIRE(writeResults.size() == 2);
+    CHECK(writeResults[0].err == TernError::NO_ERROR);
+    CHECK(writeResults[1].err == TernError::NO_ERROR);
+
+    // Transfer leader to replica 1 in DEFAULT_LOCATION via register or move
+    logEntries.clear();
+    writeResults.clear();
+    SUBCASE("viaRegister") {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+        auto& req = reqContainer.setRegisterShard();
+        req.location = DEFAULT_LOCATION;
+        req.shrid = ShardReplicaId(ShardId(1), ReplicaId(1));
+        req.isLeader = true;
+        req.addrs = addrsInfo;
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    SUBCASE("viaMove") {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+        auto& req = reqContainer.setMoveShardLeader();
+        req.location = DEFAULT_LOCATION;
+        req.shrid = ShardReplicaId(ShardId(1), ReplicaId(1));
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    db->processLogEntries(logEntries, writeResults);
+    REQUIRE(writeResults.size() == 1);
+    CHECK(writeResults[0].err == TernError::NO_ERROR);
+
+    // Verify DEFAULT_LOCATION: replica 0 cleared, replica 1 is leader
+    // Verify loc2: replica 0 still leader (untouched by DEFAULT_LOCATION change)
+    std::vector<FullShardInfo> shards;
+    db->shards(shards);
+    for (const auto& shard : shards) {
+        if (shard.id.shardId() == ShardId(1)) {
+            if (shard.locationId == DEFAULT_LOCATION) {
+                if (shard.id.replicaId() == ReplicaId(0)) {
+                    CHECK(shard.isLeader == false);
+                } else if (shard.id.replicaId() == ReplicaId(1)) {
+                    CHECK(shard.isLeader == true);
+                }
+            } else if (shard.locationId == loc2) {
+                if (shard.id.replicaId() == ReplicaId(0)) {
+                    CHECK(shard.isLeader == true);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("CdcLeaderClearsOtherReplicas") {
+    RegistryOptions options;
+    TempRegistryDB db(LogLevel::LOG_ERROR);
+    db.open(options);
+
+    std::vector<LogsDBLogEntry> logEntries;
+    std::vector<RegistryDBWriteResult> writeResults;
+    AddrsInfo addrsInfo;
+    parseIpv4Addr("1.2.3.4:8080", addrsInfo.addrs[0]);
+
+    auto loc2 = LocationId(42);
+
+    // Create second location
+    {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+        auto& req = reqContainer.setCreateLocation();
+        req.id = loc2;
+        req.name = "loc2";
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    db->processLogEntries(logEntries, writeResults);
+    REQUIRE(writeResults.size() == 1);
+    CHECK(writeResults[0].err == TernError::NO_ERROR);
+
+    // Register CDC replica 0 as leader in both locations
+    logEntries.clear();
+    writeResults.clear();
+    {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        {
+            auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+            auto& req = reqContainer.setRegisterCdc();
+            req.location = DEFAULT_LOCATION;
+            req.replica = ReplicaId(0);
+            req.isLeader = true;
+            req.addrs = addrsInfo;
+        }
+        {
+            auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+            auto& req = reqContainer.setRegisterCdc();
+            req.location = loc2;
+            req.replica = ReplicaId(0);
+            req.isLeader = true;
+            req.addrs = addrsInfo;
+        }
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    db->processLogEntries(logEntries, writeResults);
+    REQUIRE(writeResults.size() == 2);
+    CHECK(writeResults[0].err == TernError::NO_ERROR);
+    CHECK(writeResults[1].err == TernError::NO_ERROR);
+
+    // Transfer leader to replica 1 in DEFAULT_LOCATION via register or move
+    logEntries.clear();
+    writeResults.clear();
+    SUBCASE("viaRegister") {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+        auto& req = reqContainer.setRegisterCdc();
+        req.location = DEFAULT_LOCATION;
+        req.replica = ReplicaId(1);
+        req.isLeader = true;
+        req.addrs = addrsInfo;
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    SUBCASE("viaMove") {
+        auto& entry = logEntries.emplace_back();
+        entry.idx = db->lastAppliedLogEntry() + 1;
+        RegistryDBLogEntry registryLogEntry;
+        registryLogEntry.entryTime = ternNow();
+        auto& reqContainer = registryLogEntry.requests.els.emplace_back();
+        auto& req = reqContainer.setMoveCdcLeader();
+        req.location = DEFAULT_LOCATION;
+        req.replica = ReplicaId(1);
+        entry.value.resize(registryLogEntry.packedSize());
+        BincodeBuf buf((char*)entry.value.data(), entry.value.size());
+        registryLogEntry.pack(buf);
+        buf.ensureFinished();
+    }
+    db->processLogEntries(logEntries, writeResults);
+    REQUIRE(writeResults.size() == 1);
+    CHECK(writeResults[0].err == TernError::NO_ERROR);
+
+    // Verify DEFAULT_LOCATION: replica 0 cleared, replica 1 is leader
+    // Verify loc2: replica 0 still leader (untouched by DEFAULT_LOCATION change)
+    std::vector<CdcInfo> cdcs;
+    db->cdcs(cdcs);
+    for (const auto& cdc : cdcs) {
+        if (cdc.locationId == DEFAULT_LOCATION) {
+            if (cdc.replicaId == ReplicaId(0)) {
+                CHECK(cdc.isLeader == false);
+            } else if (cdc.replicaId == ReplicaId(1)) {
+                CHECK(cdc.isLeader == true);
+            }
+        } else if (cdc.locationId == loc2) {
+            if (cdc.replicaId == ReplicaId(0)) {
+                CHECK(cdc.isLeader == true);
+            }
+        }
+    }
+}
+
