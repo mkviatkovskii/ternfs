@@ -1776,10 +1776,10 @@ func main() {
 		tcpConn.SetKeepAlivePeriod(*connectionTimeout / 2)
 	}
 
-	go func() {
+	acceptConnections := func(listener net.Listener) {
 		defer func() { lrecover.HandleRecoverChan(l, terminateChan, recover()) }()
 		for {
-			conn, err := listener1.Accept()
+			conn, err := listener.Accept()
 			l.Trace("new conn %+v", conn)
 			if err != nil {
 				terminateChan <- err
@@ -1810,24 +1810,11 @@ func main() {
 				handleRequest(l, env, terminateChan, blockServices, deadBlockServices, conn.(*net.TCPConn), *futureCutoff, *connectionTimeout)
 			}()
 		}
-	}()
+	}
+
+	go acceptConnections(listener1)
 	if listener2 != nil {
-		go func() {
-			defer func() { lrecover.HandleRecoverChan(l, terminateChan, recover()) }()
-			for {
-				conn, err := listener2.Accept()
-				l.Trace("new conn %+v", conn)
-				if err != nil {
-					terminateChan <- err
-					return
-				}
-				setupConn(conn)
-				go func() {
-					defer func() { lrecover.HandleRecoverChan(l, terminateChan, recover()) }()
-					handleRequest(l, env, terminateChan, blockServices, deadBlockServices, conn.(*net.TCPConn), *futureCutoff, *connectionTimeout)
-				}()
-			}
-		}()
+		go acceptConnections(listener2)
 	}
 
 	{
