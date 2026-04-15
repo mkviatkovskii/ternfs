@@ -19,4 +19,5 @@ public:
     static void outputFilesWithDuplicateFailureDomains(const std::string& dbPath, const std::string& outputFilePath);
     static void outputBlockServiceUsage(const std::string& dbPath, const std::string& outputFilePath);
     static void rebuildBlockServicesToFiles(const std::string& dbPath);
+    static void cleanBlockServicesToFiles(const std::string& dbPath);
 };

@@ -293,6 +293,8 @@ static void usage(const char* binary) {
     fprintf(stderr, "       Opens as secondary instance and retries on compaction races (default: 3 retries).\n");
     fprintf(stderr, "  rebuild-block-services-to-files DB_PATH\n");
     fprintf(stderr, "       Drops and recreates the blockServicesToFiles CF by scanning all spans.\n");
+    fprintf(stderr, "  clean-block-services-to-files DB_PATH\n");
+    fprintf(stderr, "       Removes zero-value entries from the blockServicesToFiles CF using a checkpoint.\n");
 }
 
 int main(int argc, char** argv) {
@@ -366,6 +368,9 @@ int main(int argc, char** argv) {
         } else if (arg == "rebuild-block-services-to-files") {
             std::string dbPath = getNextArg();
             ShardDBTools::rebuildBlockServicesToFiles(dbPath);
+        } else if (arg == "clean-block-services-to-files") {
+            std::string dbPath = getNextArg();
+            ShardDBTools::cleanBlockServicesToFiles(dbPath);
         } else {
             dieWithUsage();
         }
