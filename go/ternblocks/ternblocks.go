@@ -1400,7 +1400,7 @@ func main() {
 	profileFile := flag.String("profile-file", "", "")
 	syslog := flag.Bool("syslog", false, "")
 	connectionTimeout := flag.Duration("connection-idle-timeout", 10*time.Minute, "Close connections idle for this long. Keepalive probes are sent at half this interval.")
-	reservedStorage := flag.Uint64("reserved-storage", 100<<30, "How many bytes to reserve and under-report capacity")
+	reservedStorage := flag.Uint64("reserved-storage", 0, "How many bytes to reserve and under-report capacity")
 	influxDBOrigin := flag.String("influx-db-origin", "", "Base URL to InfluxDB endpoint")
 	influxDBOrg := flag.String("influx-db-org", "", "InfluxDB org")
 	influxDBBucket := flag.String("influx-db-bucket", "", "InfluxDB bucket")
