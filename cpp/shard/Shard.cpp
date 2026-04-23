@@ -1175,8 +1175,22 @@ public:
                                 // before sending response
                                 auto now = ternNow();
                                 auto leadersAtOtherLocations = _shared.getLeadersAtOtherLocations();
-                                if ((!leadersAtOtherLocations->empty()) &&
-                                    (resp.body.resp.kind() == ShardMessageKind::CREATE_DIRECTORY_INODE || resp.body.resp.kind() == ShardMessageKind::CREATE_LOCKED_CURRENT_EDGE)) {
+                                bool needsCrossLocationWait = false;
+                                switch (resp.body.resp.kind()) {
+                                    case ShardMessageKind::CREATE_DIRECTORY_INODE:
+                                    case ShardMessageKind::CREATE_LOCKED_CURRENT_EDGE:
+                                        needsCrossLocationWait = true;
+                                        break;
+                                    case ShardMessageKind::UNLOCK_CURRENT_EDGE:
+                                        // Only the wasMoved branch actually deletes the current edge.
+                                        // Non-deleting unlocks (mkdir tail, rollbacks) don't need to
+                                        // wait -- the preceding CREATE_LOCKED_CURRENT_EDGE already did.
+                                        needsCrossLocationWait = request.msg.body.getUnlockCurrentEdge().wasMoved;
+                                        break;
+                                    default:
+                                        break;
+                                }
+                                if ((!leadersAtOtherLocations->empty()) && needsCrossLocationWait) {
                                     CrossRegionWaitInfo waitInfo;
                                     waitInfo.idx = shardEntry.idx;
                                     waitInfo.createdAt = now;
