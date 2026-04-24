@@ -616,10 +616,11 @@ type GoExes struct {
 	GcExe            string
 	RegistryProxyExe string
 	WebExe           string
+	CliExe           string
 }
 
 func BuildGoExes(ll *log.Logger, repoDir string, race bool) *GoExes {
-	args := []string{"ternblocks", "terngc", "ternfuse", "ternregistryproxy", "ternweb"}
+	args := []string{"ternblocks", "terngc", "ternfuse", "ternregistryproxy", "ternweb", "terncli"}
 	if race {
 		args = append(args, "--race")
 	}
@@ -637,6 +638,7 @@ func BuildGoExes(ll *log.Logger, repoDir string, race bool) *GoExes {
 		GcExe:            path.Join(goDir(repoDir), "terngc", "terngc"),
 		RegistryProxyExe: path.Join(goDir(repoDir), "ternregistryproxy", "ternregistryproxy"),
 		WebExe:           path.Join(goDir(repoDir), "ternweb", "ternweb"),
+		CliExe:           path.Join(goDir(repoDir), "terncli", "terncli"),
 	}
 }
 

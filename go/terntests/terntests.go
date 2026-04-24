@@ -83,6 +83,7 @@ type RunTests struct {
 	registryIp              string
 	registryPort            uint16
 	mountPoint              string
+	terncliExe              string
 	kmod                    bool
 	short                   bool
 	filter                  *regexp.Regexp
@@ -852,6 +853,27 @@ func (r *RunTests) run(
 		},
 	)
 
+	resurrectOpts := resurrectSubtreeTestOpts{
+		numDirs:      r.overrides.int("resurrectSubtree.numDirs", 30),
+		numFiles:     r.overrides.int("resurrectSubtree.numFiles", 500),
+		maxDepth:     4,
+		maxFileSize:  16 << 10, // 16KiB
+		overwriteMin: 50,
+	}
+	if r.short {
+		resurrectOpts.numDirs = r.overrides.int("resurrectSubtree.numDirs", 10)
+		resurrectOpts.numFiles = r.overrides.int("resurrectSubtree.numFiles", 100)
+		resurrectOpts.overwriteMin = 10
+	}
+	r.test(
+		log,
+		"resurrect subtree",
+		fmt.Sprintf("%v dirs, %v files", resurrectOpts.numDirs, resurrectOpts.numFiles),
+		func(counters *client.ClientCounters) {
+			resurrectSubtreeTest(log, r.terncliExe, r.registryAddress(), r.mountPoint, &resurrectOpts)
+		},
+	)
+
 	terminateChan <- nil
 }
 
@@ -1176,6 +1198,7 @@ func main() {
 		goExes = &managedprocess.GoExes{
 			BlocksExe: path.Join(*binariesDir, "ternblocks"),
 			FuseExe:   path.Join(*binariesDir, "ternfuse"),
+			CliExe:    path.Join(*binariesDir, "terncli"),
 		}
 	} else {
 		fmt.Printf("building shard/cdc/blockservice/registry\n")
@@ -1515,6 +1538,7 @@ func main() {
 			registryIp:              "127.0.0.1",
 			registryPort:            registryPort,
 			mountPoint:              mountPoint,
+			terncliExe:              goExes.CliExe,
 			kmod:                    *kmod,
 			short:                   *short,
 			filter:                  filterRe,
