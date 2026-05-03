@@ -713,7 +713,7 @@ void ShardDBTools::outputFilesWithDuplicateFailureDomains(const std::string& dbP
     sharedDb.openForReadOnly(rocksDBOptions);
     auto db = sharedDb.db();
     ShardOptions shardOptions;
-    BlockServicesCacheDB blockServiceDB{logger, xmon, sharedDb, shardOptions.blockServiceWritableDelay, shardOptions.hddDriveThroughput, shardOptions.flashDriveThroughput};
+    BlockServicesCacheDB blockServiceDB{logger, xmon, sharedDb, shardOptions.blockServiceWritableDelay, shardOptions.hddDriveThroughput, shardOptions.flashDriveThroughput, shardOptions.minSpaceRequiredForWrite};
     auto blockServiceCache = blockServiceDB.getCache();
 
     rocksdb::ReadOptions options;

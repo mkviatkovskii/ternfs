@@ -2611,7 +2611,7 @@ void runShard(ShardOptions& options) {
     sharedDB.open(rocksDBOptions);
 
     BlockServicesCacheDB blockServicesCache(logger, xmon, sharedDB, options.blockServiceWritableDelay,
-        options.hddDriveThroughput, options.flashDriveThroughput);
+        options.hddDriveThroughput, options.flashDriveThroughput, options.minSpaceRequiredForWrite);
 
     ShardDB shardDB(logger, xmon, options.shardId, options.logsDBOptions.location, options.transientDeadlineInterval, sharedDB, blockServicesCache);
     LogsDB logsDB(logger, xmon, sharedDB, options.logsDBOptions.replicaId, shardDB.lastAppliedLogEntry(), options.logsDBOptions.noReplication, !options.logsDBOptions.leaderElection, options.logsDBOptions.avoidBeingLeader);

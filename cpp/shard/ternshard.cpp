@@ -56,6 +56,10 @@ static bool parseShardOptions(CommandLineArgs& args, ShardOptions& options) {
             options.flashDriveThroughput = std::stoull(args.next().getArg());
             continue;
         }
+        if (arg == "-min-space-required-for-write") {
+            options.minSpaceRequiredForWrite = std::stoull(args.next().getArg());
+            continue;
+        }
         fprintf(stderr, "unknown argument %s\n", args.peekArg().c_str());
         return false;
     }
@@ -84,6 +88,8 @@ static void printShardOptionsUsage() {
     fprintf(stderr, "       Max throughput per HDD drive in bytes/sec. Default: 35000000\n");
     fprintf(stderr, " -flash-drive-throughput\n");
     fprintf(stderr, "       Max throughput per flash drive in bytes/sec. Default: 350000000\n");
+    fprintf(stderr, " -min-space-required-for-write\n");
+    fprintf(stderr, "       Min available bytes for a block service to be considered writable. Default: MAXIMUM_SPAN_SIZE\n");
 }
 
 static bool validateShardOptions(const ShardOptions& options) {

@@ -185,11 +185,12 @@ std::vector<rocksdb::ColumnFamilyDescriptor> BlockServicesCacheDB::getColumnFami
 }
 
 BlockServicesCacheDB::BlockServicesCacheDB(Logger& logger, std::shared_ptr<XmonAgent>& xmon, const SharedRocksDB& sharedDB, Duration blockServiceWritableDelay,
-                                           uint64_t hddDriveThroughput, uint64_t flashDriveThroughput) :
+                                           uint64_t hddDriveThroughput, uint64_t flashDriveThroughput,
+                                           uint64_t minSpaceRequiredForWrite) :
     _env(logger, xmon, "bs_cache_db"),
     _db(sharedDB.db()),
     _blockServicesCF(sharedDB.getCF("blockServicesCache")),
-    _picker(logger, xmon, 15, blockServiceWritableDelay, hddDriveThroughput, flashDriveThroughput)
+    _picker(logger, xmon, 15, blockServiceWritableDelay, hddDriveThroughput, flashDriveThroughput, minSpaceRequiredForWrite)
 {
     LOG_INFO(_env, "Initializing block services cache DB");
 

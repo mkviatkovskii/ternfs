@@ -18,8 +18,8 @@ namespace {
         return (uint16_t(locationId) << 8) | uint16_t(storageClass);
     }
 
-    inline bool blockServiceIsWritable(const BlockServiceCache& bs, Duration writableDelay) {
-        return bs.availableBytes > 0 && blockServiceFlagsWritable(bs.flags) && ternNow() - bs.firstSeen > writableDelay;
+    inline bool blockServiceIsWritable(const BlockServiceCache& bs, Duration writableDelay, uint64_t minSpaceRequiredForWrite) {
+        return bs.availableBytes > minSpaceRequiredForWrite && blockServiceFlagsWritable(bs.flags) && ternNow() - bs.firstSeen > writableDelay;
     }
 
     // Cluster-wide bytes/sec from a single shard's accumulated bytes over `elapsed`.
@@ -246,10 +246,12 @@ namespace {
 }
 
 BlockServicePicker::BlockServicePicker(Logger& logger, std::shared_ptr<XmonAgent>& xmon, uint8_t maxBlocksToPick, Duration writableDelay,
-                                       uint64_t hddDriveThroughput, uint64_t flashDriveThroughput)
+                                       uint64_t hddDriveThroughput, uint64_t flashDriveThroughput,
+                                       uint64_t minSpaceRequiredForWrite)
     : _state(nullptr), _rawState(nullptr), _rng(ternNow().ns), _env(logger, xmon, "block_service_picker"),
       _maxBlocksToPick(maxBlocksToPick), _writableDelay(writableDelay),
-      _hddDriveThroughput(hddDriveThroughput), _flashDriveThroughput(flashDriveThroughput) {}
+      _hddDriveThroughput(hddDriveThroughput), _flashDriveThroughput(flashDriveThroughput),
+      _minSpaceRequiredForWrite(minSpaceRequiredForWrite) {}
 
 void BlockServicePicker::update(
     const std::unordered_map<uint64_t, BlockServiceCache>& allBlockServices
@@ -263,7 +265,7 @@ void BlockServicePicker::update(
 
     for (const auto& [id, bs] : allBlockServices) {
         distinctBlockServiceTypeLoc.insert(lcKey(bs.locationId, bs.storageClass));
-        if (!blockServiceIsWritable(bs, _writableDelay)) continue;
+        if (!blockServiceIsWritable(bs, _writableDelay, _minSpaceRequiredForWrite)) continue;
 
         uint16_t key = lcKey(bs.locationId, bs.storageClass);
         std::string fdStr(reinterpret_cast<const char*>(bs.failureDomain.data()), bs.failureDomain.size());

@@ -19,9 +19,10 @@ static std::shared_ptr<XmonAgent> testXmon;
 static BlockServicePicker makePicker(uint8_t maxBlocksToPick = 15,
                                      Duration writableDelay = 0_sec,
                                      uint64_t hddDriveThroughput = 0,
-                                     uint64_t flashDriveThroughput = 0) {
+                                     uint64_t flashDriveThroughput = 0,
+                                     uint64_t minSpaceRequiredForWrite = 0) {
     return BlockServicePicker(testLogger, testXmon, maxBlocksToPick, writableDelay,
-                              hddDriveThroughput, flashDriveThroughput);
+                              hddDriveThroughput, flashDriveThroughput, minSpaceRequiredForWrite);
 }
 
 static FailureDomain fdWith(uint8_t v) {

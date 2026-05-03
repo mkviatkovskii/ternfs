@@ -73,7 +73,8 @@ private:
 
 public:
     BlockServicesCacheDB(Logger& logger, std::shared_ptr<XmonAgent>& xmon, const SharedRocksDB& sharedDB, Duration blockServiceWritableDelay,
-                         uint64_t hddDriveThroughput, uint64_t flashDriveThroughput);
+                         uint64_t hddDriveThroughput, uint64_t flashDriveThroughput,
+                         uint64_t minSpaceRequiredForWrite);
     static std::vector<rocksdb::ColumnFamilyDescriptor> getColumnFamilyDescriptors();
 
     void updateCache(const std::vector<FullBlockServiceInfo>& blockServices);

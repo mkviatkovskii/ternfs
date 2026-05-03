@@ -80,9 +80,11 @@ struct BlockServicePicker {
     const Duration _writableDelay;
     const uint64_t _hddDriveThroughput;    // bytes/sec per drive
     const uint64_t _flashDriveThroughput;  // bytes/sec per drive
+    const uint64_t _minSpaceRequiredForWrite;  // min available bytes for a block service to be writable
 
     BlockServicePicker(Logger& logger, std::shared_ptr<XmonAgent>& xmon, uint8_t maxBlocksToPick, Duration writableDelay,
-                       uint64_t hddDriveThroughput, uint64_t flashDriveThroughput);
+                       uint64_t hddDriveThroughput, uint64_t flashDriveThroughput,
+                       uint64_t minSpaceRequiredForWrite);
 
     void update(
         const std::unordered_map<uint64_t, BlockServiceCache>& allBlockServices

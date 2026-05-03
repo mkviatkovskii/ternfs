@@ -24,6 +24,7 @@ struct ShardOptions {
     Duration blockServiceWritableDelay = 5_mins;  // delay before new block service becomes writable
     uint64_t hddDriveThroughput = 35'000'000;      // bytes/sec per HDD drive
     uint64_t flashDriveThroughput = 350'000'000;    // bytes/sec per flash drive
+    uint64_t minSpaceRequiredForWrite = uint64_t(MAXIMUM_SPAN_SIZE);  // min available bytes for a block service to be considered writable
 
     // implicit options
     bool isLeader() const { return !logsDBOptions.avoidBeingLeader; }
