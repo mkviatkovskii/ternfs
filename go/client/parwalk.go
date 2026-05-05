@@ -226,7 +226,9 @@ func Parwalk(
 	if err != nil {
 		return err
 	}
-	return parwalkCore(log, client, options, parentId, path.Dir(root), path.Base(root), creationTime, rootId, callback)
+	return parwalkRunWithSeeds(log, client, options, callback, []parwalkSeed{
+		{parentId: parentId, parentPath: path.Dir(root), name: path.Base(root), creationTime: creationTime, rootId: rootId},
+	})
 }
 
 // ParwalkFromInode is like Parwalk but takes an inode id as the root instead
@@ -243,19 +245,57 @@ func ParwalkFromInode(
 	rootPath string,
 	callback func(parent msgs.InodeId, parentPath string, name string, creationTime msgs.TernTime, id msgs.InodeId, current bool, owned bool) error,
 ) error {
-	return parwalkCore(log, client, options, msgs.NULL_INODE_ID, path.Dir(rootPath), path.Base(rootPath), 0, rootId, callback)
+	return parwalkRunWithSeeds(log, client, options, callback, []parwalkSeed{
+		{parentId: msgs.NULL_INODE_ID, parentPath: path.Dir(rootPath), name: path.Base(rootPath), creationTime: 0, rootId: rootId},
+	})
 }
 
-func parwalkCore(
+// ParwalkMany walks several roots through a single shared 256×WorkersPerShard
+// goroutine pool. Roots are resolved up front (so a typo in any root fails
+// fast) and then seeded one after another into the same pool, so the workers
+// servicing one shard process edges from every root concurrently rather than
+// idling between roots.
+//
+// The callback contract is identical to Parwalk; callers that want to know
+// which root an edge belongs to can derive it from the parentPath argument.
+func ParwalkMany(
 	log *log.Logger,
 	client *Client,
 	options *ParwalkOptions,
-	parentId msgs.InodeId,
-	parentPath string,
-	name string,
-	creationTime msgs.TernTime,
-	rootId msgs.InodeId,
+	roots []string,
 	callback func(parent msgs.InodeId, parentPath string, name string, creationTime msgs.TernTime, id msgs.InodeId, current bool, owned bool) error,
+) error {
+	seeds := make([]parwalkSeed, 0, len(roots))
+	for _, root := range roots {
+		rootId, creationTime, parentId, err := client.ResolvePathWithParent(log, root)
+		if err != nil {
+			return fmt.Errorf("resolve %q: %w", root, err)
+		}
+		seeds = append(seeds, parwalkSeed{
+			parentId:     parentId,
+			parentPath:   path.Dir(root),
+			name:         path.Base(root),
+			creationTime: creationTime,
+			rootId:       rootId,
+		})
+	}
+	return parwalkRunWithSeeds(log, client, options, callback, seeds)
+}
+
+type parwalkSeed struct {
+	parentId     msgs.InodeId
+	parentPath   string
+	name         string
+	creationTime msgs.TernTime
+	rootId       msgs.InodeId
+}
+
+func parwalkRunWithSeeds(
+	log *log.Logger,
+	client *Client,
+	options *ParwalkOptions,
+	callback func(parent msgs.InodeId, parentPath string, name string, creationTime msgs.TernTime, id msgs.InodeId, current bool, owned bool) error,
+	seeds []parwalkSeed,
 ) error {
 	if options.WorkersPerShard < 1 {
 		panic(fmt.Errorf("workersPerShard=%d < 1", options.WorkersPerShard))
@@ -296,8 +336,10 @@ func parwalkCore(
 			}()
 		}
 	}
-	if err := env.visit(log, 0, parentId, parentPath, name, creationTime, rootId, true, true); err != nil {
-		return err
+	for _, s := range seeds {
+		if err := env.visit(log, 0, s.parentId, s.parentPath, s.name, s.creationTime, s.rootId, true, true); err != nil {
+			return err
+		}
 	}
 	go func() {
 		env.wg.Wait()

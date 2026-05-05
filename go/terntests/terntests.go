@@ -362,6 +362,30 @@ func (r *RunTests) run(
 		},
 	)
 
+	if !r.kmod {
+		// ParwalkMany exercises the Go client API directly (CDC + shard
+		// RPCs) and has nothing to do with the kmod mount, so skip it on
+		// kmod runs to keep that suite focused.
+		parwalkManyOpts := &parwalkManyOpts{
+			numRoots:        4,
+			dirsPerRoot:     80,
+			filesPerDir:     40,
+			workersPerShard: 4,
+		}
+		if r.short {
+			parwalkManyOpts.dirsPerRoot = 3
+			parwalkManyOpts.filesPerDir = 2
+		}
+		r.test(
+			log,
+			"parwalk many",
+			fmt.Sprintf("%v roots, %v dirs per root, %v files per dir", parwalkManyOpts.numRoots, parwalkManyOpts.dirsPerRoot, parwalkManyOpts.filesPerDir),
+			func(counters *client.ClientCounters) {
+				parwalkManyTest(log, r.registryAddress(), counters, parwalkManyOpts)
+			},
+		)
+	}
+
 	largeFileOpts := largeFileTestOpts{
 		fileSize: 1 << 30, // 1GiB
 	}
