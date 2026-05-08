@@ -142,6 +142,10 @@ func (flags BlockServiceFlags) HasAny(f BlockServiceFlags) bool {
 	return flags&f != 0
 }
 
+func (flags BlockServiceFlags) HasAll(f BlockServiceFlags) bool {
+	return flags&f == f
+}
+
 func (flags BlockServiceFlags) String() string {
 	if flags == 0 {
 		return "0"

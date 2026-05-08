@@ -54,8 +54,7 @@ func DestructFile(
 		atomic.AddUint64(&stats.SkippedFiles, 1)
 		return nil
 	}
-	// TODO need to think about transient files that already had dirty spans at the end.
-	// Keep destructing spans until we have nothing
+
 	initReq := msgs.RemoveSpanInitiateReq{
 		FileId: id,
 		Cookie: cookie,
@@ -96,13 +95,10 @@ func DestructFile(
 						couldNotReachBlockServices = append(couldNotReachBlockServices, block.BlockServiceId)
 						continue
 					}
-					// Check if the block was stale/decommissioned/no_write, in which case
-					// there might be nothing we can do here, for now.
-					acceptFailure := !block.BlockServiceFlags.CanWrite()
 					proof, err = c.EraseBlock(log, block)
 					if err != nil {
-						if acceptFailure {
-							log.Debug("could not erase block in stale/decommissioned block service %v while destructing file %v: %v", block.BlockServiceId, id, err)
+						if errIsTolerable(c, block.BlockServiceId, err) {
+							log.Info("tolerable erase failure for block %v in block service %v while destructing file %v: %v", block.BlockId, block.BlockServiceId, id, err)
 						} else {
 							log.RaiseAlert("could not erase block in block service %v while destructing file %v: %v", block.BlockServiceId, id, err)
 						}

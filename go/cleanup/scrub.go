@@ -84,8 +84,6 @@ func scrubWorker(
 	migratingFilesMu *sync.RWMutex,
 ) {
 	bufPool := bufpool.NewBufPool()
-	blockNotFoundAlert := log.NewNCAlert(time.Hour)
-	defer log.ClearNC(blockNotFoundAlert)
 	for {
 		req, ok := <-workerChan
 		if !ok {
@@ -115,7 +113,17 @@ func scrubWorker(
 		}
 		err := c.CheckBlock(log, &req.blockService, req.block, req.size, req.crc)
 		if badBlockError(err) {
-			if !migrateFileOnError(log, c, stats, shid, terminateChan, scratchFile, migratingFiles, migratingFilesMu, req, err, bufPool, blockNotFoundAlert) {
+			// BLOCK_NOT_FOUND from a block service is ambiguous: the block really
+			// could be gone (corruption), but it could also be that the file was
+			// destructed under us. Verify against metadata before kicking off
+			// migration.
+			if err == msgs.BLOCK_NOT_FOUND {
+				if _, serr := c.StatFile(log, req.file); serr == msgs.FILE_NOT_FOUND || serr == msgs.FILE_IS_TRANSIENT {
+					log.Info("block %v not found and file %v is %v in metadata, ignoring", req.block, req.file, serr)
+					continue
+				}
+			}
+			if !migrateFileOnError(log, c, stats, shid, terminateChan, scratchFile, migratingFiles, migratingFilesMu, req, err, bufPool) {
 				return
 			}
 		} else if err == msgs.BLOCK_IO_ERROR_DEVICE {
@@ -124,6 +132,10 @@ func scrubWorker(
 			// these errors.
 			log.Info("got IO error for file %v (block %v, block service %v), ignoring: %v", req.file, req.block, req.blockService.Id, err)
 		} else if err != nil {
+			if errIsTolerable(c, req.blockService.Id, err) {
+				log.Info("tolerable check-block failure for block %v in block service %v (flags %v): %v", req.block, req.blockService.Id, req.blockService.Flags, err)
+				continue
+			}
 			log.Info("could not check block %v for file %v, will terminate: %v", req.block, req.file, err)
 			select {
 			case terminateChan <- err:
@@ -149,8 +161,12 @@ func migrateFileOnError(
 	req *scrubRequest,
 	err error,
 	bufPool *bufpool.BufPool,
-	blockNotFoundAlert *log.XmonNCAlert,
 ) bool {
+	if bs, ok := c.GetBlockService(req.blockService.Id); ok && bs.Flags.HasAny(msgs.TERNFS_BLOCK_SERVICE_DECOMMISSIONED) {
+		log.Debug("not migrating file %v: bad block on decommissioned block service %v, leaving to migrator", req.file, req.blockService.Id)
+		return true
+	}
+
 	migratingFilesMu.Lock()
 	_, ok := migratingFiles[req.file]
 	migratingFiles[req.file] = struct{}{}
@@ -171,19 +187,28 @@ func migrateFileOnError(
 	}
 	for attempts := 1; ; attempts++ {
 		if err := scrubFileInternal(log, c, bufPool, stats, nil, nil, scratchFile, req.file); err != nil {
-			if err == msgs.BLOCK_NOT_FOUND {
-				log.RaiseNC(blockNotFoundAlert, "could not migrate blocks in file %v after %v attempts because a block was not found in it. this is probably due to conflicts with other migrations or scrubbing. will retry in one second.", req.file, attempts)
-				time.Sleep(time.Second)
-			} else {
-				log.Info("could not scrub file %v, will terminate: %v", req.file, err)
-				select {
-				case terminateChan <- err:
-				default:
+			if err == msgs.FILE_NOT_FOUND || err == msgs.BLOCK_NOT_FOUND {
+				if _, serr := c.StatFile(log, req.file); serr == msgs.FILE_NOT_FOUND || serr == msgs.FILE_IS_TRANSIENT {
+					log.Info("file %v was removed during scrub migration (now %v), ignoring: %v", req.file, serr, err)
+					return true
 				}
-				return false
 			}
+			if err == msgs.BLOCK_NOT_FOUND {
+				log.Debug("could not migrate blocks in file %v after %v attempts because a block was not found in it. this is probably due to conflicts with other migrations or scrubbing. will retry in one second.", req.file, attempts)
+				time.Sleep(time.Second)
+				continue
+			}
+			if errIsTolerable(c, req.blockService.Id, err) {
+				log.Info("tolerable failure while scrubbing file %v (block service %v): %v", req.file, req.blockService.Id, err)
+				return true
+			}
+			log.Info("could not scrub file %v, will terminate: %v", req.file, err)
+			select {
+			case terminateChan <- err:
+			default:
+			}
+			return false
 		} else {
-			log.ClearNC(blockNotFoundAlert)
 			break
 		}
 	}

@@ -1718,6 +1718,31 @@ func (c *Client) GetBlockService(blockServiceId msgs.BlockServiceId) (msgs.FullB
 	return bs, ok
 }
 
+// StatFile looks up a file's current metadata state. It probes the live inode
+// first and falls through to the transient inode on FILE_NOT_FOUND:
+//   - returns a populated StatFileResp and nil error if the file exists;
+//   - returns a zeroed StatFileResp and FILE_IS_TRANSIENT if the inode is
+//     transient (mid-destruct or never committed);
+//   - returns FILE_NOT_FOUND if neither exists (file has been fully destructed);
+//   - returns any other shard error unchanged.
+func (c *Client) StatFile(log *log.Logger, id msgs.InodeId) (msgs.StatFileResp, error) {
+	var resp msgs.StatFileResp
+	err := c.ShardRequest(log, id.Shard(), &msgs.StatFileReq{Id: id}, &resp)
+	if err == nil {
+		return resp, nil
+	}
+	if err != msgs.FILE_NOT_FOUND {
+		return msgs.StatFileResp{}, err
+	}
+	var transientResp msgs.StatTransientFileResp
+	if terr := c.ShardRequest(log, id.Shard(), &msgs.StatTransientFileReq{Id: id}, &transientResp); terr == nil {
+		return msgs.StatFileResp{}, msgs.FILE_IS_TRANSIENT
+	} else if terr != msgs.FILE_NOT_FOUND {
+		return msgs.StatFileResp{}, terr
+	}
+	return msgs.StatFileResp{}, msgs.FILE_NOT_FOUND
+}
+
 func (c *Client) RegistryRequest(logger *log.Logger, reqBody msgs.RegistryRequest) (msgs.RegistryResponse, error) {
 	return c.registryConn.Request(reqBody)
 }
