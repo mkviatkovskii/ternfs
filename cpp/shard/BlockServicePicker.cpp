@@ -10,7 +10,6 @@
 #include "Msgs.hpp"
 #include "BlockServicesCacheDB.hpp"
 #include <algorithm>
-#include <numeric>
 #include <unordered_set>
 
 namespace {
@@ -22,163 +21,59 @@ namespace {
         return bs.availableBytes > minSpaceRequiredForWrite && blockServiceFlagsWritable(bs.flags) && ternNow() - bs.firstSeen > writableDelay;
     }
 
-    // Cluster-wide bytes/sec from a single shard's accumulated bytes over `elapsed`.
     inline double throughputBytesPerSec(uint64_t accumulatedBytes, Duration elapsed) {
         double elapsedSec = static_cast<double>(elapsed.ns) / 1'000'000'000.0;
         return static_cast<double>(accumulatedBytes) * ShardId::SHARD_COUNT / elapsedSec;
     }
 
-    // Scale factor that pushes per-drive load toward `maxDriveThroughput`, clamped to >= 1.
-    // Returns 1.0 for the degenerate cases so callers can unconditionally use the result.
     inline double ratioFromThroughput(uint64_t maxDriveThroughput, uint64_t numDrives, double throughput) {
         if (maxDriveThroughput == 0 || numDrives == 0 || throughput <= 0.0) return 1.0;
         double ratio = static_cast<double>(maxDriveThroughput) * numDrives / throughput;
         return ratio < 1.0 ? 1.0 : ratio;
     }
 
-    // Clamp dominant FD weights so that maxFdWeight * maxBlocksToPick <= totalWeight.
-    // If maxFdRatio >= 1.0, also clamp so that maxFdWeight <= minFdWeight * maxFdRatio.
-    // Both caps are computed on original weights, then min(ratioCap, strideCap) is applied once.
-    void applyClamping(
+    // Cap every disk's weight to globalMinSvcWeight * maxFdRatio across the (loc, sc).
+    // At ratio = 1.0 this makes per-disk weights uniform, so FD weights become
+    // proportional to disk count and per-disk pick probability becomes uniform.
+    // At high ratio (low load) the cap is large and original capacity-proportional
+    // weights flow through unchanged.
+    void applyGlobalCap(
         BlockServicePicker::LocationStorageInfo& lsInfo,
         std::unordered_map<uint64_t, BlockServicePicker::State::ServiceLookup>& serviceToFdInfo,
-        uint8_t maxBlocksToPick,
-        double maxFdRatio = 0.0
+        double maxFdRatio
     ) {
-        auto& failureDomains = lsInfo.failureDomains;
-        if (failureDomains.empty()) return;
+        if (maxFdRatio < 1.0 || lsInfo.failureDomains.empty()) return;
 
-        // Phase 0: intra-FD (service-level) clamp. Prevents a single fresh disk
-        // in an otherwise-full FD from owning nearly all of the FD's weight,
-        // which would cause a single-disk hotspot under stridePick. Uses the
-        // same throughput-derived ratio as the FD-level pass below.
-        if (maxFdRatio >= 1.0) {
-            for (auto& fd : failureDomains) {
-                uint64_t minSvcWeight = UINT64_MAX;
-                for (const auto& svc : fd.services) {
-                    if (svc.availableBytes > 0) {
-                        minSvcWeight = std::min(minSvcWeight, svc.availableBytes);
-                    }
-                }
-                if (minSvcWeight == UINT64_MAX) continue;
-
-                double svcCapD = static_cast<double>(minSvcWeight) * maxFdRatio;
-                uint64_t svcCap = (svcCapD >= static_cast<double>(UINT64_MAX))
-                    ? UINT64_MAX : static_cast<uint64_t>(svcCapD);
-                if (svcCap == 0) svcCap = 1;
-
-                uint64_t newFdTotal = 0;
-                for (auto& svc : fd.services) {
-                    if (svc.availableBytes == 0) continue;
-                    if (svc.availableBytes > svcCap) {
-                        svc.availableBytes = svcCap;
-                        serviceToFdInfo[svc.id.u64].weight = svcCap;
-                    }
-                    newFdTotal += svc.availableBytes;
-                }
-                fd.totalWeight = newFdTotal;
-            }
-            uint64_t newLsTotal = 0;
-            for (const auto& fd : failureDomains) newLsTotal += fd.totalWeight;
-            lsInfo.totalWeight = newLsTotal;
-        }
-
-        uint64_t minFdWeight = UINT64_MAX;
-        uint64_t maxFdWeight = 0;
-        for (const auto& fd : failureDomains) {
-            if (fd.totalWeight > 0) {
-                minFdWeight = std::min(minFdWeight, fd.totalWeight);
-                maxFdWeight = std::max(maxFdWeight, fd.totalWeight);
-            }
-        }
-        if (maxFdWeight == 0) return;
-
-        // Compute ratio cap: maxFdWeight <= minFdWeight * maxFdRatio
-        uint64_t ratioCap = UINT64_MAX;
-        if (maxFdRatio >= 1.0 && minFdWeight > 0 && minFdWeight < UINT64_MAX) {
-            double ratioCapD = static_cast<double>(minFdWeight) * maxFdRatio;
-            ratioCap = (ratioCapD >= static_cast<double>(UINT64_MAX))
-                ? UINT64_MAX : static_cast<uint64_t>(ratioCapD);
-        }
-
-        // Compute stride cap: maxFdWeight * maxBlocksToPick <= totalWeight
-        uint64_t strideCap = UINT64_MAX;
-        if (maxFdWeight > lsInfo.totalWeight / maxBlocksToPick) {
-            size_t numFds = failureDomains.size();
-
-            // Sort FD indices by weight descending
-            std::vector<size_t> sortedIdx(numFds);
-            std::iota(sortedIdx.begin(), sortedIdx.end(), 0);
-            std::sort(sortedIdx.begin(), sortedIdx.end(), [&](size_t a, size_t b) {
-                return failureDomains[a].totalWeight > failureDomains[b].totalWeight;
-            });
-
-            // Find cap C: the largest value such that C * maxBlocksToPick <= c*C + S_unclamped,
-            // where c = number of FDs clamped (those with weight > C) and
-            // S_unclamped = sum of unclamped FD weights.
-            // Rearranging: C = S_unclamped / (maxBlocksToPick - c)
-            uint64_t sumTop = 0;
-            bool found = false;
-
-            for (size_t c = 1; c <= numFds && c < static_cast<size_t>(maxBlocksToPick); c++) {
-                sumTop += failureDomains[sortedIdx[c - 1]].totalWeight;
-                uint64_t sUnclamped = lsInfo.totalWeight - sumTop;
-                uint64_t candidateCap = sUnclamped / (static_cast<size_t>(maxBlocksToPick) - c);
-
-                bool topAboveCap = failureDomains[sortedIdx[c - 1]].totalWeight > candidateCap;
-                bool nextBelowOrEqCap = (c == numFds) || (failureDomains[sortedIdx[c]].totalWeight <= candidateCap);
-
-                if (topAboveCap && nextBelowOrEqCap) {
-                    strideCap = candidateCap;
-                    found = true;
-                    break;
+        uint64_t minSvcWeight = UINT64_MAX;
+        for (const auto& fd : lsInfo.failureDomains) {
+            for (const auto& svc : fd.services) {
+                if (svc.availableBytes > 0) {
+                    minSvcWeight = std::min(minSvcWeight, svc.availableBytes);
                 }
             }
-
-            if (!found) {
-                strideCap = lsInfo.totalWeight / maxBlocksToPick;
-            }
         }
+        if (minSvcWeight == UINT64_MAX) return;
 
-        uint64_t cap = std::min(ratioCap, strideCap);
-        if (cap >= maxFdWeight) return;
-        if (cap == 0) cap = 1;
+        double svcCapD = static_cast<double>(minSvcWeight) * maxFdRatio;
+        uint64_t svcCap = (svcCapD >= static_cast<double>(UINT64_MAX))
+            ? UINT64_MAX : static_cast<uint64_t>(svcCapD);
+        if (svcCap == 0) svcCap = 1;
 
-        // Single clamping loop: scale and trim FDs above cap
-        lsInfo.totalWeight = 0;
-        for (auto& fd : failureDomains) {
-            if (fd.totalWeight <= cap) {
-                lsInfo.totalWeight += fd.totalWeight;
-                continue;
-            }
-
-            double ratio = static_cast<double>(cap) / fd.totalWeight;
-            fd.totalWeight = 0;
+        uint64_t newLsTotal = 0;
+        for (auto& fd : lsInfo.failureDomains) {
+            uint64_t newFdTotal = 0;
             for (auto& svc : fd.services) {
                 if (svc.availableBytes == 0) continue;
-                svc.availableBytes = std::max(static_cast<uint64_t>(svc.availableBytes * ratio), 1ul);
-                serviceToFdInfo[svc.id.u64].weight = svc.availableBytes;
-                fd.totalWeight += svc.availableBytes;
-            }
-
-            // Trim if per-service rounding pushed FD weight above cap
-            while (fd.totalWeight > cap) {
-                BlockServicePicker::BlockServiceInfo* maxSvc = nullptr;
-                uint64_t maxSvcW = 0;
-                for (auto& svc : fd.services) {
-                    if (svc.availableBytes > maxSvcW) {
-                        maxSvcW = svc.availableBytes;
-                        maxSvc = &svc;
-                    }
+                if (svc.availableBytes > svcCap) {
+                    svc.availableBytes = svcCap;
+                    serviceToFdInfo[svc.id.u64].weight = svcCap;
                 }
-                if (!maxSvc || maxSvcW <= 1) break;
-                maxSvc->availableBytes--;
-                serviceToFdInfo[maxSvc->id.u64].weight--;
-                fd.totalWeight--;
+                newFdTotal += svc.availableBytes;
             }
-
-            lsInfo.totalWeight += fd.totalWeight;
+            fd.totalWeight = newFdTotal;
+            newLsTotal += newFdTotal;
         }
+        lsInfo.totalWeight = newLsTotal;
     }
 
     static constexpr size_t FAILURE_DOMAIN_NAME_SIZE = decltype(FailureDomain::name)::STATIC_SIZE;
@@ -188,68 +83,75 @@ namespace {
         std::array<uint8_t, FAILURE_DOMAIN_NAME_SIZE> fdData;
     };
 
-    // Stride-based pick: selects `needed` services from evenly-spaced points in the
-    // cumulative weight distribution. Returns true if all `needed` services were picked.
-    bool stridePick(
+    // Sequential weighted sampling without replacement over failure domains.
+    // For each of `needed` draws: pick an FD with probability proportional to its
+    // remaining weight, then weighted-sample a non-blacklisted disk in that FD,
+    // then drop the FD from the live set.
+    // Caller guarantees: at least `needed` FDs have positive weight in fdWeights.
+    void sequentialWeightedPick(
         const std::vector<BlockServicePicker::FailureDomainInfo>& failureDomains,
         const std::vector<uint64_t>& fdWeights,
-        uint64_t totalWeight,
         uint8_t needed,
         const std::unordered_set<uint64_t>& blacklistedServices,
         RandomGenerator& rng,
         std::vector<PickResult>& results
     ) {
-        if (totalWeight == 0 || needed == 0) return false;
-
-        uint64_t step = totalWeight / needed;
-
         results.clear();
         results.reserve(needed);
 
-        uint64_t offset = rng.generate64() % totalWeight;
-
-        for (uint8_t i = 0; i < needed; i++) {
-            uint64_t target = (offset + i * step) % totalWeight;
-
-            uint64_t cumulative = 0;
-            for (size_t fdIdx = 0; fdIdx < failureDomains.size(); fdIdx++) {
-                uint64_t fdWeight = fdWeights[fdIdx];
-                if (fdWeight == 0) continue;
-                // FD weight should not exceed step, or we may pick multiple from same FD and break guarantees
-                if (fdWeight > step) {
-                    results.clear();
-                    return false;
-                }
-
-                if (target < cumulative + fdWeight) {
-                    const auto& fdInfo = failureDomains[fdIdx];
-                    uint64_t fdTarget = target - cumulative;
-                    uint64_t svcCumulative = 0;
-
-                    for (const auto& svc : fdInfo.services) {
-                        if (blacklistedServices.contains(svc.id.u64)) continue;
-
-                        if (fdTarget < svcCumulative + svc.availableBytes) {
-                            results.push_back({svc.id, fdInfo.failureDomain.name.data});
-                            break;
-                        }
-                        svcCumulative += svc.availableBytes;
-                    }
-                    break;
-                }
-                cumulative += fdWeight;
+        std::vector<size_t> live;
+        std::vector<uint64_t> liveWeights;
+        live.reserve(failureDomains.size());
+        liveWeights.reserve(failureDomains.size());
+        uint64_t totalWeight = 0;
+        for (size_t i = 0; i < failureDomains.size(); i++) {
+            if (fdWeights[i] > 0) {
+                live.push_back(i);
+                liveWeights.push_back(fdWeights[i]);
+                totalWeight += fdWeights[i];
             }
         }
 
-        return results.size() == needed;
+        for (uint8_t k = 0; k < needed; k++) {
+            uint64_t target = rng.generate64() % totalWeight;
+            size_t chosen = 0;
+            uint64_t cumulative = 0;
+            for (size_t i = 0; i < live.size(); i++) {
+                cumulative += liveWeights[i];
+                if (target < cumulative) {
+                    chosen = i;
+                    break;
+                }
+            }
+
+            const auto& fdInfo = failureDomains[live[chosen]];
+            uint64_t fdTarget = rng.generate64() % liveWeights[chosen];
+            uint64_t svcCumulative = 0;
+            for (const auto& svc : fdInfo.services) {
+                if (blacklistedServices.contains(svc.id.u64)) continue;
+                svcCumulative += svc.availableBytes;
+                if (fdTarget < svcCumulative) {
+                    results.push_back({svc.id, fdInfo.failureDomain.name.data});
+                    break;
+                }
+            }
+
+            totalWeight -= liveWeights[chosen];
+            live[chosen] = live.back();
+            liveWeights[chosen] = liveWeights.back();
+            live.pop_back();
+            liveWeights.pop_back();
+        }
+
+        ALWAYS_ASSERT(results.size() == needed);
     }
 }
 
-BlockServicePicker::BlockServicePicker(Logger& logger, std::shared_ptr<XmonAgent>& xmon, uint8_t maxBlocksToPick, Duration writableDelay,
+BlockServicePicker::BlockServicePicker(Logger& logger, std::shared_ptr<XmonAgent>& xmon, Duration writableDelay,
                                        uint64_t hddDriveThroughput, uint64_t flashDriveThroughput,
                                        uint64_t minSpaceRequiredForWrite)
     : _state(nullptr), _rawState(nullptr), _rng(ternNow().ns), _env(logger, xmon, "block_service_picker"),
-      _maxBlocksToPick(maxBlocksToPick), _writableDelay(writableDelay),
+      _writableDelay(writableDelay),
       _hddDriveThroughput(hddDriveThroughput), _flashDriveThroughput(flashDriveThroughput),
       _minSpaceRequiredForWrite(minSpaceRequiredForWrite) {}
 
@@ -258,8 +160,6 @@ void BlockServicePicker::update(
 ) {
     auto next = std::make_shared<State>();
 
-    // Build weighted structure: group by location/storageClass, then by failure domain
-    // Map: (location, storageClass) -> map of (failure domain string) -> failure domain index
     std::unordered_map<uint16_t, std::unordered_map<std::string, size_t>> grouped;
     std::unordered_set<uint16_t> distinctBlockServiceTypeLoc;
 
@@ -302,7 +202,6 @@ void BlockServicePicker::update(
 
     _rawState.store(next, std::memory_order_release);
 
-    // Clone raw state and apply clamping, preserving existing throughput ratio
     auto clamped = std::make_shared<State>(*next);
 
     auto nowNs = ternNow().ns;
@@ -319,8 +218,6 @@ void BlockServicePicker::update(
             uint8_t storageClass = key & 0xFF;
             uint64_t maxDriveThroughput = (storageClass == FLASH_STORAGE) ? _flashDriveThroughput : _hddDriveThroughput;
 
-            // Recalculate throughput estimate from accumulated data, or initialize for new lcKeys.
-            // When maxDriveThroughput == 0 (throughput tracking disabled), skip ratio clamping.
             double ratio = 0.0;
             uint64_t lastEstimate = stats.lastThroughputEstimate.load(std::memory_order_relaxed);
             if (maxDriveThroughput > 0 && totalServices > 0) {
@@ -342,7 +239,7 @@ void BlockServicePicker::update(
                 ratio = ratioFromThroughput(maxDriveThroughput, totalServices, static_cast<double>(lastEstimate));
             }
 
-            applyClamping(lsInfo, clamped->serviceToFdInfo, _maxBlocksToPick, ratio);
+            applyGlobalCap(lsInfo, clamped->serviceToFdInfo, ratio);
 
             uint64_t maxW = 0, minW = UINT64_MAX;
             for (const auto& fd : lsInfo.failureDomains) {
@@ -383,9 +280,9 @@ TernError BlockServicePicker::pick(
     uint64_t blockSize
 ) const {
     auto state = _state.load(std::memory_order_acquire);
-    if (!state || needed == 0 || needed > _maxBlocksToPick) {
-        LOG_DEBUG(_env, "pick failed: state=%s needed=%s maxBlocksToPick=%s",
-            state != nullptr, (int)needed, (int)_maxBlocksToPick);
+    if (!state || needed == 0) {
+        LOG_DEBUG(_env, "pick failed: state=%s needed=%s",
+            state != nullptr, (int)needed);
         return TernError::COULD_NOT_PICK_BLOCK_SERVICES;
     }
 
@@ -396,7 +293,6 @@ TernError BlockServicePicker::pick(
         key = lcKey(locationId, storageClass);
     }
 
-    // Throughput tracking — spike-triggered recalc (periodic recalc happens via update())
     if (blockSize > 0) {
         ALWAYS_ASSERT(blockSize <= MAXIMUM_SPAN_SIZE,
             "blockSize %s > MAXIMUM_SPAN_SIZE %s", blockSize, MAXIMUM_SPAN_SIZE);
@@ -410,19 +306,17 @@ TernError BlockServicePicker::pick(
         Duration elapsed = now - lastRecalcTime;
         uint64_t lastEstimate = stats.lastThroughputEstimate.load(std::memory_order_relaxed);
 
-        // Trigger a recalc if we've seen a sustained spike above the last estimate — this helps us react faster to sudden load increases.
-        // We require at least 1 second of data to avoid overreacting to noise in very short intervals.
-        // We don't care in load reduction scenarios, since the periodic recalc in update() will eventually restore throughput ratios and thus unblock any clamped FDs.
+        // Trigger a recalc if we've seen a sustained spike above the last estimate.
+        // We don't react to load reductions — the periodic recalc in update() will
+        // restore throughput ratios and unblock any clamped FDs.
         bool spikeTriggered = elapsed >= 1_sec && lastEstimate > 0 &&
             throughputBytesPerSec(accumulated, elapsed) > static_cast<double>(lastEstimate) * 1.1;
 
         if (spikeTriggered && _recalcMutex.try_lock()) {
             std::unique_lock recalcLock(_recalcMutex, std::adopt_lock);
-            // Re-read after acquiring lock (another thread may have recalced)
             lastRecalcTime = TernTime(stats.lastRecalcTimeNs.load(std::memory_order_relaxed));
             elapsed = now - lastRecalcTime;
             accumulated = stats.throughputBytes.load(std::memory_order_relaxed);
-            // we need to check again as update could have happened while we were waiting for the lock, and if so we can skip recalculation
             if (elapsed > 1_sec) {
                 double currentThroughput = throughputBytesPerSec(accumulated, elapsed);
                 uint64_t numDrives = stats.numDrives;
@@ -459,7 +353,7 @@ TernError BlockServicePicker::pick(
                             }
                         }
 
-                        applyClamping(lsInfoRef, newState->serviceToFdInfo, _maxBlocksToPick, newRatio);
+                        applyGlobalCap(lsInfoRef, newState->serviceToFdInfo, newRatio);
 
                         uint64_t maxW = 0, minW = UINT64_MAX;
                         for (const auto& fd : lsInfoRef.failureDomains) {
@@ -469,10 +363,8 @@ TernError BlockServicePicker::pick(
                         stats.maxWeight.store(maxW, std::memory_order_relaxed);
                         stats.minWeight.store(lsInfoRef.failureDomains.empty() ? 0 : minW, std::memory_order_relaxed);
 
-                        // CAS swap — if update() raced, discard
                         _state.compare_exchange_strong(expected, newState, std::memory_order_release);
 
-                        // Reload state for this pick
                         state = _state.load(std::memory_order_acquire);
                     }
                 }
@@ -494,12 +386,9 @@ TernError BlockServicePicker::pick(
             blacklistedServices.insert(b.blockService.u64);
         }
 
-        // Build adjusted FD weights and lookup (copy and apply blacklist)
         std::vector<uint64_t> fdWeights;
         std::unordered_set<uint64_t> actuallyBlacklistedServices;
         fdWeights.reserve(lsInfo.failureDomains.size());
-        uint64_t totalWeight = 0;
-        uint64_t maxFdWeight = 0;
 
         for (const auto& fdInfo : lsInfo.failureDomains) {
             uint64_t adjustedWeight = fdInfo.totalWeight;
@@ -509,26 +398,30 @@ TernError BlockServicePicker::pick(
                     break;
                 }
             }
-
             fdWeights.emplace_back(adjustedWeight);
-            totalWeight += adjustedWeight;
-            maxFdWeight = std::max(maxFdWeight, adjustedWeight);
         }
 
         for(const auto& blacklistEntry : blacklist) {
             auto svcIt = state->serviceToFdInfo.find(blacklistEntry.blockService.u64);
             if (svcIt != state->serviceToFdInfo.end()) {
                 const auto& svcInfo = svcIt->second;
-                if (fdWeights[svcInfo.fdIndex] == 0) continue; // already blacklisted via FD
+                if (fdWeights[svcInfo.fdIndex] == 0) continue;
                 if (svcInfo.lcKey == key) {
                     actuallyBlacklistedServices.insert(blacklistEntry.blockService.u64);
                     fdWeights[svcInfo.fdIndex] -= svcInfo.weight;
-                    totalWeight -= svcInfo.weight;
                 }
             }
         }
 
-        auto commitResults = [&](const std::vector<PickResult>& results, bool rescaled) {
+        size_t liveFdCount = 0;
+        for (uint64_t w : fdWeights) {
+            if (w > 0) liveFdCount++;
+        }
+
+        if (liveFdCount >= needed) {
+            std::vector<PickResult> results;
+            sequentialWeightedPick(lsInfo.failureDomains, fdWeights, needed,
+                                   actuallyBlacklistedServices, _rng, results);
             out.clear();
             out.reserve(needed);
             std::lock_guard lock(_statsMutex);
@@ -539,57 +432,7 @@ TernError BlockServicePicker::pick(
                 _failureDomainStats[fdStr].fetch_add(1, std::memory_order_relaxed);
             }
             _locStorageStats[key].totalPicks.fetch_add(needed, std::memory_order_relaxed);
-            if (rescaled) _locStorageStats[key].blacklistRescales.fetch_add(1, std::memory_order_relaxed);
-        };
-
-        // Count live FDs up front — if blacklisting left us with fewer FDs than
-        // `needed`, neither fast nor slow path can succeed; bail early.
-        size_t liveFdCount = 0;
-        for (uint64_t w : fdWeights) {
-            if (w > 0) liveFdCount++;
-        }
-
-        if (totalWeight > 0 && needed > 0 && liveFdCount >= needed) {
-            // Fast path: stride pick on pre-scaled weights with blacklist adjustments
-            std::vector<PickResult> results;
-            if (stridePick(lsInfo.failureDomains, fdWeights, totalWeight, needed,
-                           actuallyBlacklistedServices, _rng, results)) {
-                commitResults(results, false);
-                return TernError::NO_ERROR;
-            }
-
-            // Slow path: blacklisting broke the stride invariant (maxFdWeight > step).
-            // just pick `needed` distinct FDs uniformly
-            // then weighted-sample one non-blacklisted service per FD.
-            std::vector<size_t> liveFds;
-            liveFds.reserve(liveFdCount);
-            for (size_t i = 0; i < lsInfo.failureDomains.size(); i++) {
-                if (fdWeights[i] > 0) liveFds.push_back(i);
-            }
-
-            results.clear();
-            results.reserve(needed);
-            for (uint8_t k = 0; k < needed; k++) {
-                size_t j = k + static_cast<size_t>(_rng.generate64() % (liveFds.size() - k));
-                std::swap(liveFds[k], liveFds[j]);
-
-                const auto& fd = lsInfo.failureDomains[liveFds[k]];
-                uint64_t target = _rng.generate64() % fdWeights[liveFds[k]];
-                uint64_t acc = 0;
-                for (const auto& svc : fd.services) {
-                    if (actuallyBlacklistedServices.contains(svc.id.u64)) continue;
-                    if (target < acc + svc.availableBytes) {
-                        results.push_back({svc.id, fd.failureDomain.name.data});
-                        break;
-                    }
-                    acc += svc.availableBytes;
-                }
-            }
-
-            if (results.size() == needed) {
-                commitResults(results, true);
-                return TernError::NO_ERROR;
-            }
+            return TernError::NO_ERROR;
         }
     }
 
@@ -639,7 +482,6 @@ BlockServicePicker::StatsSnapshot BlockServicePicker::getStats() const {
             stats.writableBlockServices.load(std::memory_order_relaxed),
             stats.maxWeight.load(std::memory_order_relaxed),
             stats.minWeight.load(std::memory_order_relaxed),
-            stats.blacklistRescales.load(std::memory_order_relaxed),
             effectiveMaxRatio,
             lastEstimate
         });
@@ -677,7 +519,6 @@ void BlockServicePicker::resetStats() {
 
     for (auto& [key, stats] : _locStorageStats) {
         stats.totalPicks.store(0, std::memory_order_relaxed);
-        stats.blacklistRescales.store(0, std::memory_order_relaxed);
     }
 
     for (auto& [id, stats] : _blockServiceStats) {

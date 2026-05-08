@@ -190,7 +190,7 @@ BlockServicesCacheDB::BlockServicesCacheDB(Logger& logger, std::shared_ptr<XmonA
     _env(logger, xmon, "bs_cache_db"),
     _db(sharedDB.db()),
     _blockServicesCF(sharedDB.getCF("blockServicesCache")),
-    _picker(logger, xmon, 15, blockServiceWritableDelay, hddDriveThroughput, flashDriveThroughput, minSpaceRequiredForWrite)
+    _picker(logger, xmon, blockServiceWritableDelay, hddDriveThroughput, flashDriveThroughput, minSpaceRequiredForWrite)
 {
     LOG_INFO(_env, "Initializing block services cache DB");
 
