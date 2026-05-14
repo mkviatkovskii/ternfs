@@ -582,6 +582,13 @@ type fileMigrationResult struct {
 	err error
 }
 
+const blockServiceRescanInterval = 1 * time.Hour
+
+type migratingBlockService struct {
+	inFlightFetchers     int
+	lastFetchCompletedAt time.Time
+}
+
 type migrator struct {
 	registryAddress           string
 	log                       *log.Logger
@@ -591,8 +598,7 @@ type migrator struct {
 	numParallelFiles          uint64
 	stats                     MigrateStats
 	blockServicesLock         *sync.RWMutex
-	scheduledBlockServices    map[msgs.BlockServiceId]any
-	blockServiceLastScheduled map[msgs.BlockServiceId]time.Time
+	scheduledBlockServices    map[msgs.BlockServiceId]*migratingBlockService
 	fileFetchers              [256]chan msgs.BlockServiceId
 	fileAggregatorNewFile     chan msgs.InodeId
 	fileAggregatoFileFinished chan fileMigrationResult
@@ -614,8 +620,7 @@ func Migrator(registryAddress string, log *log.Logger, client *client.Client, nu
 		uint64(numParallelFiles),
 		MigrateStats{},
 		&sync.RWMutex{},
-		map[msgs.BlockServiceId]any{},
-		map[msgs.BlockServiceId]time.Time{},
+		map[msgs.BlockServiceId]*migratingBlockService{},
 		[256]chan msgs.BlockServiceId{},
 		make(chan msgs.InodeId, 10000),
 		make(chan fileMigrationResult, numParallelFiles),
@@ -655,7 +660,6 @@ OUT:
 			break OUT
 		case <-ticker.C:
 		}
-		m.cleanVisitedBlockService()
 		m.log.Debug("requesting block services")
 		blockServicesResp, err := m.client.RegistryRequest(m.log, &msgs.BlockServicesNeedingMigrationReq{LocationId: m.locationId})
 		if err != nil {
@@ -663,24 +667,16 @@ OUT:
 		} else {
 			m.log.ClearNC(registryResponseAlert)
 			blockServices := blockServicesResp.(*msgs.BlockServicesNeedingMigrationResp)
-			scheduled := make(map[msgs.BlockServiceId]any)
+			scheduled := make([]msgs.BlockServiceId, 0, len(blockServices.BlockServices))
 			for _, bs := range blockServices.BlockServices {
 				if failureDomain, ok := m.client.GetFailureDomainForBlockService(bs); ok {
 					if m.failureDomainFilter != "" && failureDomain.String() != m.failureDomainFilter {
 						continue
 					}
 				}
-				scheduled[bs] = nil
-				m.ScheduleBlockService(bs)
+				scheduled = append(scheduled, bs)
 			}
-			m.blockServicesLock.Lock()
-			for bs := range m.scheduledBlockServices {
-				if _, ok := scheduled[bs]; !ok {
-					m.log.Info("unscheduling block service %v", bs)
-					delete(m.scheduledBlockServices, bs)
-				}
-			}
-			m.blockServicesLock.Unlock()
+			m.UpdateScheduled(scheduled)
 		}
 	}
 	m.log.Debug("stop received waiting for fetchers to stop")
@@ -693,17 +689,38 @@ OUT:
 	m.log.Debug("migrator stopped")
 }
 
-func (m *migrator) ScheduleBlockService(bs msgs.BlockServiceId) {
-	m.blockServicesLock.Lock()
-	defer m.blockServicesLock.Unlock()
-	now := time.Now()
-	if _, ok := m.blockServiceLastScheduled[bs]; ok {
-		return
+func (m *migrator) UpdateScheduled(blockServices []msgs.BlockServiceId) {
+	wanted := make(map[msgs.BlockServiceId]any, len(blockServices))
+	for _, bs := range blockServices {
+		wanted[bs] = nil
 	}
-	if _, ok := m.scheduledBlockServices[bs]; !ok {
-		m.log.Info("scheduling block service %v", bs)
-		m.scheduledBlockServices[bs] = nil
-		m.blockServiceLastScheduled[bs] = now
+	toFetch := []msgs.BlockServiceId{}
+	m.blockServicesLock.Lock()
+	for bs := range m.scheduledBlockServices {
+		if _, ok := wanted[bs]; !ok {
+			m.log.Info("unscheduling block service %v", bs)
+			delete(m.scheduledBlockServices, bs)
+		}
+	}
+	for bs := range wanted {
+		state, ok := m.scheduledBlockServices[bs]
+		if !ok {
+			m.log.Info("scheduling block service %v", bs)
+			state = &migratingBlockService{}
+			m.scheduledBlockServices[bs] = state
+		}
+		if state.inFlightFetchers > 0 {
+			continue
+		}
+		if time.Since(state.lastFetchCompletedAt) < blockServiceRescanInterval {
+			continue
+		}
+		state.inFlightFetchers = len(m.fileFetchers)
+		toFetch = append(toFetch, bs)
+	}
+	m.blockServicesLock.Unlock()
+	for _, bs := range toFetch {
+		m.log.Info("dispatching file fetch for block service %v", bs)
 		for _, c := range m.fileFetchers {
 			c <- bs
 		}
@@ -717,17 +734,6 @@ func (m *migrator) Stop() {
 
 func (m *migrator) MigrationFinishedStats() <-chan MigrateStats {
 	return m.statsC
-}
-
-func (m *migrator) cleanVisitedBlockService() {
-	m.blockServicesLock.Lock()
-	defer m.blockServicesLock.Unlock()
-	now := time.Now()
-	for id, scheduled := range m.blockServiceLastScheduled {
-		if now.Sub(scheduled) > time.Hour {
-			delete(m.blockServiceLastScheduled, id)
-		}
-	}
 }
 
 func (m *migrator) runFileFetchers(wg *sync.WaitGroup) {
@@ -765,6 +771,14 @@ func (m *migrator) runFileFetchers(wg *sync.WaitGroup) {
 					}
 					filesReq.StartFrom = filesResp.FileIds[len(filesResp.FileIds)-1] + 1
 				}
+				m.blockServicesLock.Lock()
+				if state, ok := m.scheduledBlockServices[blockServiceId]; ok {
+					state.inFlightFetchers--
+					if state.inFlightFetchers == 0 {
+						state.lastFetchCompletedAt = time.Now()
+					}
+				}
+				m.blockServicesLock.Unlock()
 				m.log.Debug("finished fetching files for block service %v in shard %v, scheduled %d files", blockServiceId, shid, filesScheduled)
 			}
 		}(msgs.ShardId(idx), c)

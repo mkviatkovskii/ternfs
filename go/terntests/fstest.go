@@ -1104,7 +1104,7 @@ func fsTestInternal[Id comparable](
 				defer wg.Done()
 				migrator.Run()
 			}()
-			migrator.ScheduleBlockService(blockServiceToPurge)
+			migrator.UpdateScheduled([]msgs.BlockServiceId{blockServiceToPurge})
 			migrateStats := <-migrator.MigrationFinishedStats()
 			migrator.Stop()
 			wg.Wait()
