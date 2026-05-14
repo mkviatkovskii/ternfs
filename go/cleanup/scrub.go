@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 	"xtx/ternfs/cleanup/scratch"
 	"xtx/ternfs/client"
 	"xtx/ternfs/core/bufpool"
@@ -55,6 +54,10 @@ func scrubFileInternal(
 		if badBlockError(err) {
 			log.ErrorNoAlert("found bad block, block service %v, block %v: %v", blockService.Id, block.BlockId, err)
 			return true, nil
+		}
+		if err != nil && errIsTolerable(c, blockService.Id, err) {
+			log.Info("tolerable check-block failure for block %v in block service %v: %v", block.BlockId, blockService.Id, err)
+			return false, nil
 		}
 		return false, err
 	}
@@ -187,19 +190,12 @@ func migrateFileOnError(
 	}
 	for attempts := 1; ; attempts++ {
 		if err := scrubFileInternal(log, c, bufPool, stats, nil, nil, scratchFile, req.file); err != nil {
-			if err == msgs.FILE_NOT_FOUND || err == msgs.BLOCK_NOT_FOUND {
-				if _, serr := c.StatFile(log, req.file); serr == msgs.FILE_NOT_FOUND || serr == msgs.FILE_IS_TRANSIENT {
-					log.Info("file %v was removed during scrub migration (now %v), ignoring: %v", req.file, serr, err)
-					return true
-				}
-			}
-			if err == msgs.BLOCK_NOT_FOUND {
-				log.Debug("could not migrate blocks in file %v after %v attempts because a block was not found in it. this is probably due to conflicts with other migrations or scrubbing. will retry in one second.", req.file, attempts)
-				time.Sleep(time.Second)
-				continue
-			}
 			if errIsTolerable(c, req.blockService.Id, err) {
 				log.Info("tolerable failure while scrubbing file %v (block service %v): %v", req.file, req.blockService.Id, err)
+				return true
+			}
+			if _, serr := c.StatFile(log, req.file); serr == msgs.FILE_NOT_FOUND || serr == msgs.FILE_IS_TRANSIENT {
+				log.Info("file %v is %v in metadata, ignoring scrub failure: %v", req.file, serr, err)
 				return true
 			}
 			log.Info("could not scrub file %v, will terminate: %v", req.file, err)
