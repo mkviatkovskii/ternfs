@@ -223,4 +223,3 @@ func runTagFiles(l *log.Logger, c *client.Client, p *tagFilesParams) error {
 	}
 	return closeErr
 }
-

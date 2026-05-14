@@ -14,10 +14,10 @@ import (
 )
 
 type parwalkManyOpts struct {
-	numRoots          int
-	dirsPerRoot       int
-	filesPerDir       int
-	workersPerShard   int
+	numRoots        int
+	dirsPerRoot     int
+	filesPerDir     int
+	workersPerShard int
 }
 
 // parwalkManyTest creates several disjoint root subtrees, walks them all
