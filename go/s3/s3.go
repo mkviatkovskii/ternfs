@@ -140,6 +140,17 @@ func (p *objectPath) dir() *objectPath {
 	return d
 }
 
+// isDirectoryContentType reports whether a Content-Type marks an object as a
+// directory. s3fs sends "application/x-directory" for mkdir; "httpd/unix-directory"
+// is the Apache/Nextcloud convention.
+func isDirectoryContentType(contentType string) bool {
+	if i := strings.IndexByte(contentType, ';'); i >= 0 {
+		contentType = contentType[:i]
+	}
+	contentType = strings.TrimSpace(contentType)
+	return contentType == "application/x-directory" || contentType == "httpd/unix-directory"
+}
+
 func parseObjectPath(str string) *objectPath {
 	p := &objectPath{
 		segments:    []string{},
@@ -494,7 +505,11 @@ func (s *S3Server) handleGetObject(ctx context.Context, w http.ResponseWriter, r
 	w.Header().Set("ETag", FileEtag(dentry.TargetId))
 	w.Header().Set("Last-Modified", lastModified.Time().Format(http.TimeFormat))
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Type", "application/octet-stream")
+	if dentry.TargetId.Type() == msgs.DIRECTORY {
+		w.Header().Set("Content-Type", "application/x-directory")
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
 
 	if rangeHeader == "" {
 		w.Header().Set("Content-Length", strconv.FormatInt(int64(size), 10))
@@ -714,10 +729,22 @@ func (s *S3Server) handlePutObject(ctx context.Context, w http.ResponseWriter, r
 
 	var inode msgs.InodeId
 	basename := path.basename()
-	if path.isDirectory {
+	if path.isDirectory || isDirectoryContentType(r.Header.Get("Content-Type")) {
 		resp := &msgs.MakeDirectoryResp{}
 		if err := s.c.CDCRequest(s.log, &msgs.MakeDirectoryReq{OwnerId: ownerId, Name: basename}, resp); err != nil {
-			return fmt.Errorf("failed to make directory: %w", err)
+			// mkdir must be idempotent: clients (e.g. s3fs) re-PUT directory
+			// markers, and stat refreshes can race. If the name already exists
+			// as a directory, treat it as success.
+			if errors.Is(err, msgs.CANNOT_OVERRIDE_NAME) {
+				lookupResp := &msgs.LookupResp{}
+				if lookupErr := s.c.ShardRequest(s.log, ownerId.Shard(), &msgs.LookupReq{DirId: ownerId, Name: basename}, lookupResp); lookupErr == nil && lookupResp.TargetId.Type() == msgs.DIRECTORY {
+					inode = lookupResp.TargetId
+				} else {
+					return fmt.Errorf("failed to make directory: %w", err)
+				}
+			} else {
+				return fmt.Errorf("failed to make directory: %w", err)
+			}
 		} else {
 			inode = resp.Id
 		}
