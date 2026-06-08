@@ -131,10 +131,11 @@ type blockServiceStats struct {
 	badCertificate           uint64
 }
 type env struct {
-	bufPool        *bufpool.BufPool
-	stats          map[msgs.BlockServiceId]*blockServiceStats
-	counters       map[msgs.BlocksMessageKind]*timing.Timings
-	eraseLocks     map[msgs.BlockServiceId]*sync.Mutex
+	bufPool  *bufpool.BufPool
+	stats    map[msgs.BlockServiceId]*blockServiceStats
+	counters map[msgs.BlocksMessageKind]*timing.Timings
+	// per block service: buffered to max-erases-per-block-service
+	eraseLimiters  map[msgs.BlockServiceId]chan struct{}
 	registryConn   *client.RegistryConn
 	failureDomain  string
 	hostname       string
@@ -364,9 +365,9 @@ func checkEraseCertificate(log *log.Logger, blockServiceId msgs.BlockServiceId, 
 }
 
 func eraseBlock(log *log.Logger, env *env, blockServiceId msgs.BlockServiceId, basePath string, blockId msgs.BlockId) error {
-	m := env.eraseLocks[blockServiceId]
-	m.Lock()
-	defer m.Unlock()
+	limiter := env.eraseLimiters[blockServiceId]
+	limiter <- struct{}{}
+	defer func() { <-limiter }()
 	blockPath := path.Join(basePath, blockId.Path())
 	log.Debug("deleting block %v at path %v", blockId, blockPath)
 	err := eraseFileIfExistsAndSyncDir(blockPath)
@@ -1408,6 +1409,7 @@ func main() {
 	ioAlertPercent := flag.Uint("io-alert-percent", 10, "Threshold percent of I/O errors over which we alert")
 	registryConnectionTimeout := flag.Duration("registry-connection-timeout", 10*time.Second, "")
 	dscp := flag.Uint("dscp", 0, "DSCP value to set on connections")
+	maxErasesPerBlockService := flag.Uint("max-erases-per-block-service", 10, "Maximum concurrent block erases per block service.")
 
 	flag.Parse()
 	flagErrors := false
@@ -1576,7 +1578,7 @@ func main() {
 	env := &env{
 		bufPool:        bufPool,
 		stats:          make(map[msgs.BlockServiceId]*blockServiceStats),
-		eraseLocks:     make(map[msgs.BlockServiceId]*sync.Mutex),
+		eraseLimiters:  make(map[msgs.BlockServiceId]chan struct{}),
 		failureDomain:  *failureDomainStr,
 		pathPrefix:     *pathPrefixStr,
 		ioAlertPercent: uint8(*ioAlertPercent),
@@ -1730,13 +1732,17 @@ func main() {
 
 	terminateChan := make(chan any)
 
+	eraseConcurrency := int(*maxErasesPerBlockService)
+	if eraseConcurrency < 1 {
+		eraseConcurrency = 1
+	}
 	for bsId := range blockServices {
 		env.stats[bsId] = &blockServiceStats{}
-		env.eraseLocks[bsId] = &sync.Mutex{}
+		env.eraseLimiters[bsId] = make(chan struct{}, eraseConcurrency)
 	}
 	for bsId := range deadBlockServices {
 		env.stats[bsId] = &blockServiceStats{}
-		env.eraseLocks[bsId] = &sync.Mutex{}
+		env.eraseLimiters[bsId] = make(chan struct{}, eraseConcurrency)
 	}
 	env.counters = make(map[msgs.BlocksMessageKind]*timing.Timings)
 	for _, k := range msgs.AllBlocksMessageKind {
