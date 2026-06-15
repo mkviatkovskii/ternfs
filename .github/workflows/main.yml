@@ -116,7 +116,13 @@ jobs:
           sudo sed -Ei 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
           apt-get update
           apt-get install -y qemu-system-x86 cloud-image-utils
-          apt-get build-dep -y linux linux-image-unsigned-$(uname -r)
+          # build-dep only pulls the kernel build toolchain, which is the same
+          # across kernel flavours.
+          kpkg=$(apt-cache search --names-only '^linux-image-unsigned-6\.14\..*-generic$' \
+            | awk '{print $1}' | sort -V | tail -n1)
+          if [ -z "$kpkg" ]; then echo "no 6.14 -generic kernel source package found" >&2; exit 1; fi
+          echo "using kernel build-dep package: $kpkg"
+          apt-get build-dep -y linux "$kpkg"
           apt-get install -y fakeroot llvm libncurses-dev dwarves
       - name: Download base qemu image
         run: curl -fsSL -O https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
