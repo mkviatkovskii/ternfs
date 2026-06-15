@@ -527,6 +527,32 @@ TEST_CASE("touch file") {
     }
 }
 
+TEST_CASE("heartbeat entry is a no-op that advances applied time") {
+    TernTime startTime(1234567890);
+    _setCurrentTime(startTime);
+    TempShardDB db(LogLevel::LOG_ERROR, ShardId(0));
+
+    ShardRespContainer respContainer;
+    ShardLogEntry logEntry;
+
+    REQUIRE(db->lastAppliedEntryTime() == startTime);
+
+    TernTime heartbeatTime(startTime.ns + 1000);
+    logEntry.body.setHeartbeat();
+    logEntry.time = heartbeatTime;
+    NO_TERN_ERROR_IN_RESPONSE(respContainer, db->applyLogEntry(1, logEntry, respContainer));
+    db->flush(false);
+
+    REQUIRE(db->lastAppliedLogEntry() == 1);
+    REQUIRE(db->lastAppliedEntryTime() == heartbeatTime);
+
+    db.restart();
+    REQUIRE(db->lastAppliedLogEntry() == 1);
+    REQUIRE(db->lastAppliedEntryTime() == heartbeatTime);
+
+    _setCurrentTime(0);
+}
+
 TEST_CASE("override") {
     TempShardDB db(LogLevel::LOG_ERROR, ShardId(0));
 

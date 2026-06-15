@@ -44,6 +44,14 @@ static bool parseShardOptions(CommandLineArgs& args, ShardOptions& options) {
             options.regionStalenessThreshold = parseDuration(args.next());
             continue;
         }
+        if (arg == "-read-staleness-threshold") {
+            options.readStalenessThreshold = parseDuration(args.next());
+            continue;
+        }
+        if (arg == "-heartbeat-emission-interval") {
+            options.heartbeatEmissionInterval = parseDuration(args.next());
+            continue;
+        }
         if (arg == "-block-service-writable-delay") {
             options.blockServiceWritableDelay = parseDuration(args.next());
             continue;
@@ -76,6 +84,10 @@ static void printShardOptionsUsage() {
     fprintf(stderr, "ShardOptions:\n");
     fprintf(stderr, " -region-staleness-threshold\n");
     fprintf(stderr, "    	Duration after which a cross-region shard is considered down. Default: 10m\n");
+    fprintf(stderr, " -read-staleness-threshold\n");
+    fprintf(stderr, "    	Stop serving reads when the newest applied log entry is older than this. 0 disables. Default: 10s\n");
+    fprintf(stderr, " -heartbeat-emission-interval\n");
+    fprintf(stderr, "    	How often the primary leader emits a heartbeat log entry while idle. 0 disables. Default: 1s\n");
     fprintf(stderr, " -num-readers\n");
     fprintf(stderr, "    	Number of reader threads. Default: 1\n");
     fprintf(stderr, " -shard\n");

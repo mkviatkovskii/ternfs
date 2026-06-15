@@ -1487,6 +1487,7 @@ func generateCpp(errors []string, shardReqResps []reqRespType, cdcReqResps []req
 			reflect.TypeOf(msgs.AddSpanLocationEntry{}),
 			reflect.TypeOf(msgs.SameShardHardFileUnlinkEntry{}),
 			reflect.TypeOf(msgs.MakeFileTransientEntry{}),
+			reflect.TypeOf(msgs.HeartbeatEntry{}),
 		},
 	)
 

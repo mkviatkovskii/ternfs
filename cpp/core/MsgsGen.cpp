@@ -11800,6 +11800,9 @@ std::ostream& operator<<(std::ostream& out, ShardLogEntryKind err) {
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         out << "MAKE_FILE_TRANSIENT";
         break;
+    case ShardLogEntryKind::HEARTBEAT:
+        out << "HEARTBEAT";
+        break;
     case ShardLogEntryKind::EMPTY:
         out << "EMPTY";
         break;
@@ -12756,6 +12759,20 @@ std::ostream& operator<<(std::ostream& out, const MakeFileTransientEntry& x) {
     return out;
 }
 
+void HeartbeatEntry::pack(BincodeBuf& buf) const {
+}
+void HeartbeatEntry::unpack(BincodeBuf& buf) {
+}
+void HeartbeatEntry::clear() {
+}
+bool HeartbeatEntry::operator==(const HeartbeatEntry& rhs) const {
+    return true;
+}
+std::ostream& operator<<(std::ostream& out, const HeartbeatEntry& x) {
+    out << "HeartbeatEntry(" << ")";
+    return out;
+}
+
 const ConstructFileEntry& ShardLogEntryContainer::getConstructFile() const {
     ALWAYS_ASSERT(_kind == ShardLogEntryKind::CONSTRUCT_FILE, "%s != %s", _kind, ShardLogEntryKind::CONSTRUCT_FILE);
     return std::get<0>(_data);
@@ -13035,6 +13052,15 @@ MakeFileTransientEntry& ShardLogEntryContainer::setMakeFileTransient() {
     auto& x = _data.emplace<30>();
     return x;
 }
+const HeartbeatEntry& ShardLogEntryContainer::getHeartbeat() const {
+    ALWAYS_ASSERT(_kind == ShardLogEntryKind::HEARTBEAT, "%s != %s", _kind, ShardLogEntryKind::HEARTBEAT);
+    return std::get<31>(_data);
+}
+HeartbeatEntry& ShardLogEntryContainer::setHeartbeat() {
+    _kind = ShardLogEntryKind::HEARTBEAT;
+    auto& x = _data.emplace<31>();
+    return x;
+}
 ShardLogEntryContainer::ShardLogEntryContainer() {
     clear();
 }
@@ -13145,6 +13171,9 @@ void ShardLogEntryContainer::operator=(const ShardLogEntryContainer& other) {
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         setMakeFileTransient() = other.getMakeFileTransient();
         break;
+    case ShardLogEntryKind::HEARTBEAT:
+        setHeartbeat() = other.getHeartbeat();
+        break;
     default:
         throw TERN_EXCEPTION("bad ShardLogEntryKind kind %s", other.kind());
     }
@@ -13220,6 +13249,8 @@ size_t ShardLogEntryContainer::packedSize() const {
         return sizeof(ShardLogEntryKind) + std::get<29>(_data).packedSize();
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         return sizeof(ShardLogEntryKind) + std::get<30>(_data).packedSize();
+    case ShardLogEntryKind::HEARTBEAT:
+        return sizeof(ShardLogEntryKind) + std::get<31>(_data).packedSize();
     default:
         throw TERN_EXCEPTION("bad ShardLogEntryKind kind %s", _kind);
     }
@@ -13320,6 +13351,9 @@ void ShardLogEntryContainer::pack(BincodeBuf& buf) const {
         break;
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         std::get<30>(_data).pack(buf);
+        break;
+    case ShardLogEntryKind::HEARTBEAT:
+        std::get<31>(_data).pack(buf);
         break;
     default:
         throw TERN_EXCEPTION("bad ShardLogEntryKind kind %s", _kind);
@@ -13422,6 +13456,9 @@ void ShardLogEntryContainer::unpack(BincodeBuf& buf) {
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         _data.emplace<30>().unpack(buf);
         break;
+    case ShardLogEntryKind::HEARTBEAT:
+        _data.emplace<31>().unpack(buf);
+        break;
     default:
         throw BINCODE_EXCEPTION("bad ShardLogEntryKind kind %s", _kind);
     }
@@ -13493,6 +13530,8 @@ bool ShardLogEntryContainer::operator==(const ShardLogEntryContainer& other) con
         return getSameShardHardFileUnlink() == other.getSameShardHardFileUnlink();
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         return getMakeFileTransient() == other.getMakeFileTransient();
+    case ShardLogEntryKind::HEARTBEAT:
+        return getHeartbeat() == other.getHeartbeat();
     default:
         throw BINCODE_EXCEPTION("bad ShardLogEntryKind kind %s", _kind);
     }
@@ -13592,6 +13631,9 @@ std::ostream& operator<<(std::ostream& out, const ShardLogEntryContainer& x) {
         break;
     case ShardLogEntryKind::MAKE_FILE_TRANSIENT:
         out << x.getMakeFileTransient();
+        break;
+    case ShardLogEntryKind::HEARTBEAT:
+        out << x.getHeartbeat();
         break;
     case ShardLogEntryKind::EMPTY:
         out << "EMPTY";

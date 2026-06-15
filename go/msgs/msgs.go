@@ -2034,6 +2034,8 @@ type RemoveZeroBlockServiceFilesEntry struct {
 	StartFile         InodeId
 }
 
+type HeartbeatEntry struct{}
+
 // --------------------------------------------------------------------
 // registry requests/responses
 

@@ -7649,6 +7649,7 @@ enum class ShardLogEntryKind : uint16_t {
     ADD_SPAN_LOCATION = 29,
     SAME_SHARD_HARD_FILE_UNLINK = 30,
     MAKE_FILE_TRANSIENT = 31,
+    HEARTBEAT = 32,
     EMPTY = 255,
 };
 
@@ -8592,11 +8593,32 @@ struct MakeFileTransientEntry {
 
 std::ostream& operator<<(std::ostream& out, const MakeFileTransientEntry& x);
 
+struct HeartbeatEntry {
+
+    static constexpr uint16_t STATIC_SIZE = 0; // 
+
+    HeartbeatEntry() { clear(); }
+    HeartbeatEntry(const HeartbeatEntry&) = default;
+    HeartbeatEntry& operator=(const HeartbeatEntry&) = default;
+    HeartbeatEntry(HeartbeatEntry&&) = default;
+    HeartbeatEntry& operator=(HeartbeatEntry&&) = default;
+    size_t packedSize() const {
+        size_t _size = 0;
+        return _size;
+    }
+    void pack(BincodeBuf& buf) const;
+    void unpack(BincodeBuf& buf);
+    void clear();
+    bool operator==(const HeartbeatEntry&rhs) const;
+};
+
+std::ostream& operator<<(std::ostream& out, const HeartbeatEntry& x);
+
 struct ShardLogEntryContainer {
 private:
-    static constexpr std::array<size_t,31> _staticSizes = {ConstructFileEntry::STATIC_SIZE, LinkFileEntry::STATIC_SIZE, SameDirectoryRenameEntry::STATIC_SIZE, SoftUnlinkFileEntry::STATIC_SIZE, CreateDirectoryInodeEntry::STATIC_SIZE, CreateLockedCurrentEdgeEntry::STATIC_SIZE, UnlockCurrentEdgeEntry::STATIC_SIZE, LockCurrentEdgeEntry::STATIC_SIZE, RemoveDirectoryOwnerEntry::STATIC_SIZE, RemoveInodeEntry::STATIC_SIZE, SetDirectoryOwnerEntry::STATIC_SIZE, SetDirectoryInfoEntry::STATIC_SIZE, RemoveNonOwnedEdgeEntry::STATIC_SIZE, ScrapTransientFileEntry::STATIC_SIZE, RemoveSpanInitiateEntry::STATIC_SIZE, AddSpanInitiateEntry::STATIC_SIZE, AddSpanCertifyEntry::STATIC_SIZE, AddInlineSpanEntry::STATIC_SIZE, MakeFileTransientDEPRECATEDEntry::STATIC_SIZE, RemoveSpanCertifyEntry::STATIC_SIZE, RemoveOwnedSnapshotFileEdgeEntry::STATIC_SIZE, SwapBlocksEntry::STATIC_SIZE, MoveSpanEntry::STATIC_SIZE, SetTimeEntry::STATIC_SIZE, RemoveZeroBlockServiceFilesEntry::STATIC_SIZE, SwapSpansEntry::STATIC_SIZE, SameDirectoryRenameSnapshotEntry::STATIC_SIZE, AddSpanAtLocationInitiateEntry::STATIC_SIZE, AddSpanLocationEntry::STATIC_SIZE, SameShardHardFileUnlinkEntry::STATIC_SIZE, MakeFileTransientEntry::STATIC_SIZE};
+    static constexpr std::array<size_t,32> _staticSizes = {ConstructFileEntry::STATIC_SIZE, LinkFileEntry::STATIC_SIZE, SameDirectoryRenameEntry::STATIC_SIZE, SoftUnlinkFileEntry::STATIC_SIZE, CreateDirectoryInodeEntry::STATIC_SIZE, CreateLockedCurrentEdgeEntry::STATIC_SIZE, UnlockCurrentEdgeEntry::STATIC_SIZE, LockCurrentEdgeEntry::STATIC_SIZE, RemoveDirectoryOwnerEntry::STATIC_SIZE, RemoveInodeEntry::STATIC_SIZE, SetDirectoryOwnerEntry::STATIC_SIZE, SetDirectoryInfoEntry::STATIC_SIZE, RemoveNonOwnedEdgeEntry::STATIC_SIZE, ScrapTransientFileEntry::STATIC_SIZE, RemoveSpanInitiateEntry::STATIC_SIZE, AddSpanInitiateEntry::STATIC_SIZE, AddSpanCertifyEntry::STATIC_SIZE, AddInlineSpanEntry::STATIC_SIZE, MakeFileTransientDEPRECATEDEntry::STATIC_SIZE, RemoveSpanCertifyEntry::STATIC_SIZE, RemoveOwnedSnapshotFileEdgeEntry::STATIC_SIZE, SwapBlocksEntry::STATIC_SIZE, MoveSpanEntry::STATIC_SIZE, SetTimeEntry::STATIC_SIZE, RemoveZeroBlockServiceFilesEntry::STATIC_SIZE, SwapSpansEntry::STATIC_SIZE, SameDirectoryRenameSnapshotEntry::STATIC_SIZE, AddSpanAtLocationInitiateEntry::STATIC_SIZE, AddSpanLocationEntry::STATIC_SIZE, SameShardHardFileUnlinkEntry::STATIC_SIZE, MakeFileTransientEntry::STATIC_SIZE, HeartbeatEntry::STATIC_SIZE};
     ShardLogEntryKind _kind = ShardLogEntryKind::EMPTY;
-    std::variant<ConstructFileEntry, LinkFileEntry, SameDirectoryRenameEntry, SoftUnlinkFileEntry, CreateDirectoryInodeEntry, CreateLockedCurrentEdgeEntry, UnlockCurrentEdgeEntry, LockCurrentEdgeEntry, RemoveDirectoryOwnerEntry, RemoveInodeEntry, SetDirectoryOwnerEntry, SetDirectoryInfoEntry, RemoveNonOwnedEdgeEntry, ScrapTransientFileEntry, RemoveSpanInitiateEntry, AddSpanInitiateEntry, AddSpanCertifyEntry, AddInlineSpanEntry, MakeFileTransientDEPRECATEDEntry, RemoveSpanCertifyEntry, RemoveOwnedSnapshotFileEdgeEntry, SwapBlocksEntry, MoveSpanEntry, SetTimeEntry, RemoveZeroBlockServiceFilesEntry, SwapSpansEntry, SameDirectoryRenameSnapshotEntry, AddSpanAtLocationInitiateEntry, AddSpanLocationEntry, SameShardHardFileUnlinkEntry, MakeFileTransientEntry> _data;
+    std::variant<ConstructFileEntry, LinkFileEntry, SameDirectoryRenameEntry, SoftUnlinkFileEntry, CreateDirectoryInodeEntry, CreateLockedCurrentEdgeEntry, UnlockCurrentEdgeEntry, LockCurrentEdgeEntry, RemoveDirectoryOwnerEntry, RemoveInodeEntry, SetDirectoryOwnerEntry, SetDirectoryInfoEntry, RemoveNonOwnedEdgeEntry, ScrapTransientFileEntry, RemoveSpanInitiateEntry, AddSpanInitiateEntry, AddSpanCertifyEntry, AddInlineSpanEntry, MakeFileTransientDEPRECATEDEntry, RemoveSpanCertifyEntry, RemoveOwnedSnapshotFileEdgeEntry, SwapBlocksEntry, MoveSpanEntry, SetTimeEntry, RemoveZeroBlockServiceFilesEntry, SwapSpansEntry, SameDirectoryRenameSnapshotEntry, AddSpanAtLocationInitiateEntry, AddSpanLocationEntry, SameShardHardFileUnlinkEntry, MakeFileTransientEntry, HeartbeatEntry> _data;
 public:
     ShardLogEntryContainer();
     ShardLogEntryContainer(const ShardLogEntryContainer& other);
@@ -8668,6 +8690,8 @@ public:
     SameShardHardFileUnlinkEntry& setSameShardHardFileUnlink();
     const MakeFileTransientEntry& getMakeFileTransient() const;
     MakeFileTransientEntry& setMakeFileTransient();
+    const HeartbeatEntry& getHeartbeat() const;
+    HeartbeatEntry& setHeartbeat();
 
     void clear() { _kind = ShardLogEntryKind::EMPTY; };
 
