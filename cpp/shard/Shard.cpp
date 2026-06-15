@@ -2657,6 +2657,11 @@ void runShard(ShardOptions& options) {
     rocksDBOptions.max_open_files = 1000;
     // We batch writes and flush manually.
     rocksDBOptions.manual_wal_flush = true;
+    // Give compaction enough parallelism to keep up with tombstone churn from
+    // bulk deletions; the stock defaults (2 jobs, 1 subcompaction) bottleneck on
+    // a single thread while idle cores are available. See -rocksdb-max-* flags.
+    rocksDBOptions.max_background_jobs = options.rocksdbMaxBackgroundJobs;
+    rocksDBOptions.max_subcompactions = options.rocksdbMaxSubcompactions;
     sharedDB.open(rocksDBOptions);
 
     BlockServicesCacheDB blockServicesCache(logger, xmon, sharedDB, options.blockServiceWritableDelay,

@@ -20,6 +20,8 @@ struct ShardOptions {
     bool shardIdSet = false;
 
     uint16_t numReaders = 1;
+    int32_t rocksdbMaxBackgroundJobs = 4;
+    int32_t rocksdbMaxSubcompactions = 4;
     Duration regionStalenessThreshold = 10_mins;
     // Stop serving reads when our newest applied log entry is older than this. 0 disables read gating.
     Duration readStalenessThreshold = 10_sec;

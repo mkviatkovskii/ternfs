@@ -68,6 +68,14 @@ static bool parseShardOptions(CommandLineArgs& args, ShardOptions& options) {
             options.minSpaceRequiredForWrite = std::stoull(args.next().getArg());
             continue;
         }
+        if (arg == "-rocksdb-max-background-jobs") {
+            options.rocksdbMaxBackgroundJobs = parseUint16(args.next());
+            continue;
+        }
+        if (arg == "-rocksdb-max-subcompactions") {
+            options.rocksdbMaxSubcompactions = parseUint16(args.next());
+            continue;
+        }
         fprintf(stderr, "unknown argument %s\n", args.peekArg().c_str());
         return false;
     }
@@ -102,6 +110,10 @@ static void printShardOptionsUsage() {
     fprintf(stderr, "       Max throughput per flash drive in bytes/sec. Default: 350000000\n");
     fprintf(stderr, " -min-space-required-for-write\n");
     fprintf(stderr, "       Min available bytes for a block service to be considered writable. Default: MAXIMUM_SPAN_SIZE\n");
+    fprintf(stderr, " -rocksdb-max-background-jobs\n");
+    fprintf(stderr, "       Max RocksDB background jobs (flush+compaction threads). Default: 4\n");
+    fprintf(stderr, " -rocksdb-max-subcompactions\n");
+    fprintf(stderr, "       Max RocksDB subcompactions (intra-compaction parallelism). Default: 4\n");
 }
 
 static bool validateShardOptions(const ShardOptions& options) {
