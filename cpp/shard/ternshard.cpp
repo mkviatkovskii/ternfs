@@ -44,6 +44,14 @@ static bool parseShardOptions(CommandLineArgs& args, ShardOptions& options) {
             options.regionStalenessThreshold = parseDuration(args.next());
             continue;
         }
+        if (arg == "-read-staleness-threshold") {
+            options.readStalenessThreshold = parseDuration(args.next());
+            continue;
+        }
+        if (arg == "-heartbeat-emission-interval") {
+            options.heartbeatEmissionInterval = parseDuration(args.next());
+            continue;
+        }
         if (arg == "-block-service-writable-delay") {
             options.blockServiceWritableDelay = parseDuration(args.next());
             continue;
@@ -58,6 +66,14 @@ static bool parseShardOptions(CommandLineArgs& args, ShardOptions& options) {
         }
         if (arg == "-min-space-required-for-write") {
             options.minSpaceRequiredForWrite = std::stoull(args.next().getArg());
+            continue;
+        }
+        if (arg == "-rocksdb-max-background-jobs") {
+            options.rocksdbMaxBackgroundJobs = parseUint16(args.next());
+            continue;
+        }
+        if (arg == "-rocksdb-max-subcompactions") {
+            options.rocksdbMaxSubcompactions = parseUint16(args.next());
             continue;
         }
         fprintf(stderr, "unknown argument %s\n", args.peekArg().c_str());
@@ -76,6 +92,10 @@ static void printShardOptionsUsage() {
     fprintf(stderr, "ShardOptions:\n");
     fprintf(stderr, " -region-staleness-threshold\n");
     fprintf(stderr, "    	Duration after which a cross-region shard is considered down. Default: 10m\n");
+    fprintf(stderr, " -read-staleness-threshold\n");
+    fprintf(stderr, "    	Stop serving reads when the newest applied log entry is older than this. 0 disables. Default: 10s\n");
+    fprintf(stderr, " -heartbeat-emission-interval\n");
+    fprintf(stderr, "    	How often the primary leader emits a heartbeat log entry while idle. 0 disables. Default: 1s\n");
     fprintf(stderr, " -num-readers\n");
     fprintf(stderr, "    	Number of reader threads. Default: 1\n");
     fprintf(stderr, " -shard\n");
@@ -90,6 +110,10 @@ static void printShardOptionsUsage() {
     fprintf(stderr, "       Max throughput per flash drive in bytes/sec. Default: 350000000\n");
     fprintf(stderr, " -min-space-required-for-write\n");
     fprintf(stderr, "       Min available bytes for a block service to be considered writable. Default: MAXIMUM_SPAN_SIZE\n");
+    fprintf(stderr, " -rocksdb-max-background-jobs\n");
+    fprintf(stderr, "       Max RocksDB background jobs (flush+compaction threads). Default: 4\n");
+    fprintf(stderr, " -rocksdb-max-subcompactions\n");
+    fprintf(stderr, "       Max RocksDB subcompactions (intra-compaction parallelism). Default: 4\n");
 }
 
 static bool validateShardOptions(const ShardOptions& options) {

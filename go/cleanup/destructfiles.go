@@ -173,6 +173,7 @@ func destructFilesWorker(
 func destructFilesScraper(
 	log *log.Logger,
 	c *client.Client,
+	opts *DestructFilesOptions,
 	state *DestructFilesState,
 	terminateChan chan<- any,
 	shid msgs.ShardId,
@@ -198,6 +199,9 @@ func destructFilesScraper(
 		now := msgs.Now()
 		for ix := range resp.Files {
 			file := &resp.Files[ix]
+			if opts.NumInstances > 1 && (uint64(file.Id)>>8)%opts.NumInstances != opts.InstanceIdx {
+				continue
+			}
 			if now < file.DeadlineTime {
 				log.Debug("%v: deadline not expired (deadline=%v, now=%v), not destructing", file.Id, file.DeadlineTime, now)
 				continue
@@ -220,6 +224,12 @@ func destructFilesScraper(
 type DestructFilesOptions struct {
 	NumWorkersPerShard int
 	WorkersQueueSize   int
+	// To scale destruct-files horizontally, run multiple terngc instances with
+	// the same NumInstances but distinct InstanceIdx in [0, NumInstances). Each
+	// instance only destructs files where (fileId>>8) % NumInstances == InstanceIdx,
+	// matching the migrator's fileId sharding.
+	NumInstances uint64
+	InstanceIdx  uint64
 }
 
 func DestructFiles(
@@ -232,6 +242,9 @@ func DestructFiles(
 	if opts.NumWorkersPerShard <= 0 {
 		panic(fmt.Errorf("the number of workers should be positive, got %v", opts.NumWorkersPerShard))
 	}
+	if opts.NumInstances > 0 && opts.InstanceIdx >= opts.NumInstances {
+		panic(fmt.Errorf("instance index %v should be less than the number of instances %v", opts.InstanceIdx, opts.NumInstances))
+	}
 	terminateChan := make(chan any, 1)
 	defer close(terminateChan)
 	workersChan := make(chan *destructFileRequest, opts.WorkersQueueSize)
@@ -240,7 +253,7 @@ func DestructFiles(
 
 	go func() {
 		defer func() { lrecover.HandleRecoverChan(log, terminateChan, recover()) }()
-		destructFilesScraper(log, c, stats, terminateChan, shid, workersChan)
+		destructFilesScraper(log, c, opts, stats, terminateChan, shid, workersChan)
 	}()
 
 	go func() {

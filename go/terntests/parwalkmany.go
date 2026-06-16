@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 	"xtx/ternfs/client"
 	"xtx/ternfs/core/log"
 	"xtx/ternfs/msgs"
@@ -90,11 +91,27 @@ func parwalkManyTest(
 		// Recompute max distinct active shards. Coarse — we just count
 		// non-zero slots. This isn't a tight bound but it surfaces the
 		// "did roots actually overlap on the worker pool" signal.
+		//
+		// The callback body is microseconds long, so two shard workers
+		// landing in it at the same instant is pure scheduler luck —
+		// which made the >=2 assertion below flaky. Until we've actually
+		// observed an overlap, linger briefly while still marked active so
+		// a worker draining another shard has a chance to join the window.
+		// If the pool were truly serial nothing else is ever active, the
+		// poll exits immediately, and the assertion still fails as intended.
 		var conc int32
-		for i := range activeShards {
-			if atomic.LoadInt32(&activeShards[i]) > 0 {
-				conc++
+		deadline := time.Now().Add(time.Second)
+		for {
+			conc = 0
+			for i := range activeShards {
+				if atomic.LoadInt32(&activeShards[i]) > 0 {
+					conc++
+				}
 			}
+			if conc >= 2 || atomic.LoadInt32(&maxConc) >= 2 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
 		}
 		for {
 			cur := atomic.LoadInt32(&maxConc)

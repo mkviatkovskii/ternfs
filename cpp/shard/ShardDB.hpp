@@ -87,6 +87,9 @@ public:
     // The index of the last log entry persisted to the DB
     uint64_t lastAppliedLogEntry();
 
+    // The time of the last log entry applied to the DB
+    TernTime lastAppliedEntryTime() const;
+
     // Applies the log entry at the given index, and fills in the client response.
     // The log entry index should be the next in line to be applied to the state --
     // `lastAppliedLogEntry() + 1`.

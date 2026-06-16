@@ -100,6 +100,8 @@ func main() {
 	destructFiles := flag.Bool("destruct-files", false, "")
 	destructFilesWorkersPerShard := flag.Int("destruct-files-workers-per-shard", 10, "")
 	destructFilesWorkersQueueSize := flag.Int("destruct-files-workers-queue-size", 50, "")
+	numDestructFiles := flag.Int("num-destruct-files", 1, "How many destruct-files instances are running. 1 by default")
+	destructFilesIdx := flag.Int("destruct-files-idx", 0, "Which destruct-files instance is this. should be less than num-destruct-files. 0 by default")
 	collectDirectoriesMinCycleInterval := flag.Duration("collect-directories-min-cycle-interval", 15*time.Minute, "Minimum interval between collect-directories cycles per shard")
 	destructFilesMinCycleInterval := flag.Duration("destruct-files-min-cycle-interval", 15*time.Minute, "Minimum interval between destruct-files cycles per shard")
 	defrag := flag.Bool("defrag", false, "")
@@ -347,9 +349,19 @@ func main() {
 		}
 	}
 	if *destructFiles {
+		if *numDestructFiles < 1 {
+			fmt.Fprintf(os.Stderr, "-num-destruct-files must be at least 1.\n")
+			os.Exit(2)
+		}
+		if *destructFilesIdx < 0 || *destructFilesIdx >= *numDestructFiles {
+			fmt.Fprintf(os.Stderr, "-destruct-files-idx must be in [0, %v).\n", *numDestructFiles)
+			os.Exit(2)
+		}
 		opts := &cleanup.DestructFilesOptions{
 			NumWorkersPerShard: *destructFilesWorkersPerShard,
 			WorkersQueueSize:   *destructFilesWorkersQueueSize,
+			NumInstances:       uint64(*numDestructFiles),
+			InstanceIdx:        uint64(*destructFilesIdx),
 		}
 		for i := 0; i < 256; i++ {
 			shid := msgs.ShardId(i)

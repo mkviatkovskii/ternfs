@@ -24,12 +24,14 @@ enum class ShardMetadataKey : uint8_t {
     NEXT_FILE_ID = 2,
     NEXT_SYMLINK_ID = 3,
     NEXT_BLOCK_ID = 4,
+    LAST_APPLIED_ENTRY_TIME = 5,
 };
 constexpr ShardMetadataKey SHARD_INFO_KEY = ShardMetadataKey::INFO;
 constexpr ShardMetadataKey LAST_APPLIED_LOG_ENTRY_KEY = ShardMetadataKey::LAST_APPLIED_LOG_ENTRY;
 constexpr ShardMetadataKey NEXT_FILE_ID_KEY = ShardMetadataKey::NEXT_FILE_ID;
 constexpr ShardMetadataKey NEXT_SYMLINK_ID_KEY = ShardMetadataKey::NEXT_SYMLINK_ID;
 constexpr ShardMetadataKey NEXT_BLOCK_ID_KEY = ShardMetadataKey::NEXT_BLOCK_ID;
+constexpr ShardMetadataKey LAST_APPLIED_ENTRY_TIME_KEY = ShardMetadataKey::LAST_APPLIED_ENTRY_TIME;
 
 inline rocksdb::Slice shardMetadataKey(const ShardMetadataKey* k) {
     return rocksdb::Slice((const char*)k, sizeof(*k));

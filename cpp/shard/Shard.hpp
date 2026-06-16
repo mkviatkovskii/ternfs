@@ -20,7 +20,13 @@ struct ShardOptions {
     bool shardIdSet = false;
 
     uint16_t numReaders = 1;
+    int32_t rocksdbMaxBackgroundJobs = 4;
+    int32_t rocksdbMaxSubcompactions = 4;
     Duration regionStalenessThreshold = 10_mins;
+    // Stop serving reads when our newest applied log entry is older than this. 0 disables read gating.
+    Duration readStalenessThreshold = 10_sec;
+    // How often the primary leader emits a heartbeat log entry while otherwise idle. 0 disables emission.
+    Duration heartbeatEmissionInterval = 1_sec;
     Duration blockServiceWritableDelay = 5_mins;  // delay before new block service becomes writable
     uint64_t hddDriveThroughput = 35'000'000;      // bytes/sec per HDD drive
     uint64_t flashDriveThroughput = 350'000'000;    // bytes/sec per flash drive

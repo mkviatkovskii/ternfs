@@ -16,6 +16,7 @@
 #include <rocksdb/snapshot.h>
 #include <rocksdb/statistics.h>
 #include <rocksdb/table.h>
+#include <rocksdb/utilities/table_properties_collectors.h>
 #include <rocksdb/write_batch.h>
 #include <system_error>
 #include <type_traits>
@@ -147,13 +148,21 @@ std::vector<rocksdb::ColumnFamilyDescriptor> ShardDB::getColumnFamilyDescriptors
     // one.
     rocksdb::ColumnFamilyOptions blockServicesToFilesOptions;
     blockServicesToFilesOptions.merge_operator = CreateInt64AddOperator();
+
+    // The edges CF (and to a lesser extent directories) is delete-heavy: removing
+    // directory entries leaves tombstones, and a bulk deletion can pile up millions of them.
+    // Iterating over lot of tombstones can cpu starve read path.
+    rocksdb::ColumnFamilyOptions tombstoneCompactOptions;
+    tombstoneCompactOptions.table_properties_collector_factories.emplace_back(
+        rocksdb::NewCompactOnDeletionCollectorFactory(/*sliding_window_size=*/10000, /*deletion_trigger=*/5000));
+
     return std::vector<rocksdb::ColumnFamilyDescriptor> {
             {rocksdb::kDefaultColumnFamilyName, {}},
             {"files", {}},
             {"spans", {}},
             {"transientFiles", {}},
-            {"directories", {}},
-            {"edges", {}},
+            {"directories", tombstoneCompactOptions},
+            {"edges", tombstoneCompactOptions},
             {"blockServicesToFiles", blockServicesToFilesOptions},
     };
 }
@@ -166,10 +175,6 @@ struct ShardDBImpl {
     Duration _transientDeadlineInterval;
     std::array<uint8_t, 16> _secretKey;
     AES128Key _expandedSecretKey;
-
-    // TODO it would be good to store basically all of the metadata in memory,
-    // so that we'd just read from it, but this requires a bit of care when writing
-    // since we rollback on error.
 
     rocksdb::DB* _db;
     rocksdb::ColumnFamilyHandle* _defaultCf;
@@ -304,6 +309,15 @@ struct ShardDBImpl {
             LOG_INFO(_env, "initializing last applied log entry");
             auto v = U64Value::Static(0);
             ROCKS_DB_CHECKED(_db->Put({}, _defaultCf, shardMetadataKey(&LAST_APPLIED_LOG_ENTRY_KEY), v.toSlice()));
+        }
+
+        if (!keyExists(_defaultCf, shardMetadataKey(&LAST_APPLIED_ENTRY_TIME_KEY))) {
+            // A genuinely fresh shard has no lag, so start "now" -- otherwise it
+            // would gate all reads until its first entry. A restart instead loads
+            // the persisted (possibly stale) time and waits until it catches up.
+            LOG_INFO(_env, "initializing last applied entry time");
+            auto v = U64Value::Static(ternNow().ns);
+            ROCKS_DB_CHECKED(_db->Put({}, _defaultCf, shardMetadataKey(&LAST_APPLIED_ENTRY_TIME_KEY), v.toSlice()));
         }
     }
 
@@ -1819,13 +1833,16 @@ struct ShardDBImpl {
     // ----------------------------------------------------------------
     // log application
 
-    void _advanceLastAppliedLogEntry(rocksdb::WriteBatch& batch, uint64_t index) {
+    void _advanceLastAppliedLogEntry(rocksdb::WriteBatch& batch, uint64_t index, TernTime time) {
         uint64_t oldIndex = _lastAppliedLogEntry({});
         ALWAYS_ASSERT(oldIndex+1 == index, "old index is %s, expected %s, got %s", oldIndex, oldIndex+1, index);
         LOG_DEBUG(_env, "bumping log index from %s to %s", oldIndex, index);
         StaticValue<U64Value> v;
         v().setU64(index);
         ROCKS_DB_CHECKED(batch.Put({}, shardMetadataKey(&LAST_APPLIED_LOG_ENTRY_KEY), v.toSlice()));
+        StaticValue<U64Value> t;
+        t().setU64(time.ns);
+        ROCKS_DB_CHECKED(batch.Put({}, shardMetadataKey(&LAST_APPLIED_ENTRY_TIME_KEY), t.toSlice()));
     }
 
     TernError _applyConstructFile(rocksdb::WriteBatch& batch, TernTime time, const ConstructFileEntry& entry, ConstructFileResp& resp) {
@@ -3722,8 +3739,10 @@ struct ShardDBImpl {
         resp.clear();
         auto err = TernError::NO_ERROR;
 
+        TernTime time = logEntry.time;
+
         rocksdb::WriteBatch batch;
-        _advanceLastAppliedLogEntry(batch, logIndex);
+        _advanceLastAppliedLogEntry(batch, logIndex, time);
         // We set this savepoint since we still want to record the log index advancement
         // even if the application does _not_ go through.
         //
@@ -3733,7 +3752,6 @@ struct ShardDBImpl {
         batch.SetSavePoint();
 
         std::string entryScratch;
-        TernTime time = logEntry.time;
         const auto& logEntryBody = logEntry.body;
 
         LOG_TRACE(_env, "about to apply log entry %s", logEntryBody);
@@ -3861,6 +3879,9 @@ struct ShardDBImpl {
         case ShardLogEntryKind::REMOVE_ZERO_BLOCK_SERVICE_FILES:
             err = _applyRemoveZeroBlockServiceFiles(time, batch, logEntryBody.getRemoveZeroBlockServiceFiles(), resp.setRemoveZeroBlockServiceFiles());
             break;
+        case ShardLogEntryKind::HEARTBEAT:
+            // No state change -- the entry exists purely to advance the applied time.
+            break;
         default:
             throw TERN_EXCEPTION("bad log entry kind %s", logEntryBody.kind());
         }
@@ -3888,6 +3909,13 @@ struct ShardDBImpl {
         ROCKS_DB_CHECKED(_db->Get(options, shardMetadataKey(&LAST_APPLIED_LOG_ENTRY_KEY), &value));
         ExternalValue<U64Value> v(value);
         return v().u64();
+    }
+
+    TernTime _lastAppliedEntryTime(const rocksdb::ReadOptions& options) {
+        std::string value;
+        ROCKS_DB_CHECKED(_db->Get(options, shardMetadataKey(&LAST_APPLIED_ENTRY_TIME_KEY), &value));
+        ExternalValue<U64Value> v(value);
+        return TernTime(v().u64());
     }
 
     TernError _getDirectory(const rocksdb::ReadOptions& options, InodeId id, bool allowSnapshot, std::string& dirValue, ExternalValue<DirectoryBody>& dir) {
@@ -4143,6 +4171,14 @@ void ShardDB::applyLogEntry(uint64_t logEntryIx, const ShardLogEntry& logEntry, 
 
 uint64_t ShardDB::lastAppliedLogEntry() {
     return ((ShardDBImpl*)_impl)->_lastAppliedLogEntry({});
+}
+
+TernTime ShardDB::lastAppliedEntryTime() const {
+    auto* impl = (ShardDBImpl*)_impl;
+    auto snapshot = impl->_getCurrentReadSnapshot();
+    rocksdb::ReadOptions options;
+    options.snapshot = snapshot.get();
+    return impl->_lastAppliedEntryTime(options);
 }
 
 const std::array<uint8_t, 16>& ShardDB::secretKey() const {
