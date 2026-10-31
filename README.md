@@ -140,7 +140,7 @@ TernFS is actively used in production, but the project is still evolving quickly
     * the most fun and pleasant part of the codebase
   * **FUSE**
     * `ternfuse`, Go FUSE implementation of a TernFS client
-    * slower than the kmod although still performant, requires a BPF program to correctly detect file closes (see `-close-tracker-object` flag)
+    * slower than the kmod although still performant, uses [process close tracking](docs/ternfuse-close-tracking.md) by default; BPF tracking is optional (see `-close-tracker-object` flag)
   * **S3**
     * `terns3`, Go implementation of the S3 API
     * minimal example intended as a start point for a more serious implementation
