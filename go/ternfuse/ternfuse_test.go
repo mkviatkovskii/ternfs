@@ -16,6 +16,7 @@ import (
 	"github.com/XTXMarkets/ternfs/go/client"
 	"github.com/XTXMarkets/ternfs/go/core/log"
 	"github.com/XTXMarkets/ternfs/go/msgs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 func TestCDCRequestReturnsIO(t *testing.T) {
@@ -41,5 +42,33 @@ func TestCDCRequestReturnsIO(t *testing.T) {
 	errno := cdcRequest(&msgs.MakeDirectoryReq{OwnerId: msgs.ROOT_DIR_INODE_ID, Name: strings.Repeat("x", 256)}, &msgs.MakeDirectoryResp{})
 	if errno != syscall.EIO {
 		t.Fatalf("cdcRequest = %v, want EIO", errno)
+	}
+}
+
+func callerCtx(t *testing.T, pid int) context.Context {
+	return fuse.NewContext(t.Context(), &fuse.Caller{Pid: uint32(pid)})
+}
+
+func TestFlushFromOtherProcessDoesNotLink(t *testing.T) {
+	logger = log.NewLogger(os.Stderr, &log.LoggerOptions{Level: log.ERROR})
+	pid := os.Getpid()
+	for _, tc := range []struct {
+		name   string
+		owner  uint32
+		caller int
+	}{
+		{"other process", uint32(pid) + 1, pid},
+		{"caller not visible", uint32(pid), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tf := &transientFile{name: "x"}
+			f := &ternFile{body: tf, owner: tc.owner}
+			if errno := f.Flush(callerCtx(t, tc.caller)); errno != 0 {
+				t.Fatalf("Flush = %v, want 0", errno)
+			}
+			if f.body != tf {
+				t.Fatalf("body = %T, want the transient file", f.body)
+			}
+		})
 	}
 }

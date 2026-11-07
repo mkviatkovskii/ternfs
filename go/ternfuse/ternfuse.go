@@ -268,9 +268,18 @@ type failedTransientFile struct {
 }
 
 type ternFile struct {
-	id   msgs.InodeId
-	mu   sync.RWMutex
-	body any // one of *transientFile/failedTransientFile/*FileReader
+	id    msgs.InodeId
+	mu    sync.RWMutex
+	body  any    // one of *transientFile/failedTransientFile/*FileReader
+	owner uint32 // FUSE pid of the creator, 0 if unknown
+}
+
+// 0 if there is no caller, or it is outside our pid namespace.
+func callerPid(ctx context.Context) uint32 {
+	if caller, ok := fuse.FromContext(ctx); ok {
+		return caller.Pid
+	}
+	return 0
 }
 
 func (n *ternNode) createInternal(name string, flags uint32, mode uint32) (tf *ternFile, errno syscall.Errno) {
@@ -314,10 +323,15 @@ func (n *ternNode) Create(
 ) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	logger.Debug("create id=%v, name=%q, flags=0x%08x, mode=0x%08x", n.id, name, flags, mode)
 	isTmpfile := flags&unix.O_TMPFILE == unix.O_TMPFILE
+	var owner uint32
+	if closeMap == nil {
+		owner = callerPid(ctx)
+	}
 	tf, err := n.createInternal(name, flags, mode)
 	if err != 0 {
 		return nil, nil, 0, err
 	}
+	tf.owner = owner
 	fileNode := &ternNode{
 		id: tf.id,
 	}
@@ -467,25 +481,6 @@ func (f *ternFile) write(data []byte) (written uint32, errno syscall.Errno) {
 	return uint32(len(data)), 0
 }
 
-func (f *ternFile) rlock(locked *bool) {
-	*locked = false
-	f.mu.RLock()
-}
-
-func (f *ternFile) writeLock(locked *bool) {
-	f.mu.RUnlock()
-	*locked = true
-	f.mu.Lock()
-}
-
-func (f *ternFile) unlock(locked *bool) {
-	if *locked {
-		f.mu.Unlock()
-	} else {
-		f.mu.RUnlock()
-	}
-}
-
 func (f *ternFile) Write(ctx context.Context, data []byte, off int64) (written uint32, errno syscall.Errno) {
 	logger.Debug("write file=%v, off=%v, count=%v", f.id, off, len(data))
 
@@ -494,9 +489,8 @@ func (f *ternFile) Write(ctx context.Context, data []byte, off int64) (written u
 		return 0, 0
 	}
 
-	var writeLocked bool
-	f.rlock(&writeLocked)
-	defer f.unlock(&writeLocked)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
 	switch tf := f.body.(type) {
 	case *transientFile:
@@ -504,7 +498,6 @@ func (f *ternFile) Write(ctx context.Context, data []byte, off int64) (written u
 			logger.Info("refusing to write in the past off=%v written=%v len=%v", off, tf.written, int64(len(tf.span.Bytes())))
 			return 0, syscall.EINVAL
 		}
-		f.writeLock(&writeLocked)
 		zeros := off - (tf.written + int64(len(tf.span.Bytes())))
 		if zeros > 0 {
 			logger.Debug("file=%v writing %v zeros", f.id, zeros)
@@ -552,13 +545,11 @@ func readFileSetattr(id msgs.InodeId, in *fuse.SetAttrIn, out *fuse.AttrOut) sys
 func (f *ternFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	logger.Debug("setattr inode=%v, in=%+v", f.id, in)
 
-	var writeLocked bool
-	f.rlock(&writeLocked)
-	defer f.unlock(&writeLocked)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
 	switch tf := f.body.(type) {
 	case *transientFile: // we can extend transient files using ftruncate
-		f.writeLock(&writeLocked)
 		if in.Valid&^(fuse.FATTR_SIZE|fuse.FATTR_LOCKOWNER|fuse.FATTR_FH) != 0 {
 			logger.Debug("inode=%v bad valid %08x", f.id, in.Valid)
 			return syscall.ENOTSUP
@@ -593,9 +584,8 @@ func (f *ternFile) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.At
 func (f *ternFile) Flush(ctx context.Context) syscall.Errno {
 	logger.Debug("flush file=%v", f.id)
 
-	var writeLocked bool
-	f.rlock(&writeLocked)
-	defer f.unlock(&writeLocked)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
 	switch tf := f.body.(type) {
 	case *transientFile:
@@ -619,9 +609,13 @@ func (f *ternFile) Flush(ctx context.Context) syscall.Errno {
 				return syscall.EIO
 			}
 			logger.Debug("Found file %v in close map, will close", f.id)
+		} else if f.owner != 0 {
+			if caller := callerPid(ctx); caller != f.owner {
+				logger.Debug("flush file=%v caller=%v is not owner=%v, skipping", f.id, caller, f.owner)
+				return 0
+			}
 		}
 		// We're committed to closing now
-		f.writeLock(&writeLocked)
 		if err := f.writeSpan(); err != 0 {
 			logger.Debug("tf %v could not write span, %v", f.id, err)
 			return err
