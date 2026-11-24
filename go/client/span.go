@@ -1493,9 +1493,19 @@ func (c *Client) ReadFile(
 	bufPool *bufpool.BufPool,
 	id msgs.InodeId,
 ) (io.ReadSeekCloser, error) {
+	r, _, err := c.ReadFileWithSpans(log, bufPool, id)
+	return r, err
+}
+
+// ReadFileWithSpans returns the reader and its shared, read-only span metadata.
+func (c *Client) ReadFileWithSpans(
+	log *log.Logger,
+	bufPool *bufpool.BufPool,
+	id msgs.InodeId,
+) (io.ReadSeekCloser, []SpanWithBlockServices, error) {
 	fr, err := c.NewFileReader(log, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	r := &fileReader{
 		client:  c,
@@ -1503,7 +1513,7 @@ func (c *Client) ReadFile(
 		bufPool: bufPool,
 		reader:  fr,
 	}
-	return r, nil
+	return r, fr.spans, nil
 }
 
 func (c *Client) FetchFile(

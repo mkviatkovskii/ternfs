@@ -22,6 +22,47 @@ import (
 	"testing"
 )
 
+func TestReadFileWithSpans(t *testing.T) {
+	id := msgs.MakeInodeId(msgs.FILE, 0, 1)
+	data := []byte("span")
+	header := msgs.FetchedSpanHeader{
+		Size:         uint32(len(data)),
+		Crc:          msgs.Crc(crc32c.Sum(0, data)),
+		StorageClass: msgs.INLINE_STORAGE,
+	}
+	response := msgs.LocalFileSpansResp{Spans: []msgs.FetchedSpan{
+		{Header: header, Body: &msgs.FetchedInlineSpan{Body: data}},
+	}}
+	requests := make(map[uint64]bool)
+	c, logger := metadataRetryClient(t, DefaultShardTimeout, metadataTestAddrs, func(packet []byte) ([]byte, error) {
+		requests[binary.LittleEndian.Uint64(packet[4:])] = true
+		if len(requests) > 1 {
+			t.Error("reader fetched span metadata twice")
+		}
+		var req msgs.LocalFileSpansReq
+		err := req.Unpack(bytes.NewReader(packet[13:]))
+		if err != nil || packet[12] != byte(msgs.LOCAL_FILE_SPANS) || req.FileId != id {
+			t.Errorf("unexpected span request %v, error = %v", req, err)
+		}
+		reply := binary.LittleEndian.AppendUint32(nil, msgs.SHARD_RESP_PROTOCOL_VERSION)
+		buf := bytes.NewBuffer(append(reply, packet[4:13]...))
+		err = response.Pack(buf)
+		return buf.Bytes(), err
+	})
+	reader, spans, err := c.ReadFileWithSpans(logger, nil, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if len(spans) != 1 || spans[0].Span.Header != header {
+		t.Fatalf("unexpected span metadata %v", spans)
+	}
+	got, err := io.ReadAll(reader)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("file contents = %q, error = %v", got, err)
+	}
+}
+
 type errorWithStack struct {
 	err   error
 	stack []byte

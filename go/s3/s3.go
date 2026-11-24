@@ -7,11 +7,14 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"github.com/XTXMarkets/ternfs/go/client"
 	"github.com/XTXMarkets/ternfs/go/core/bufpool"
+	"github.com/XTXMarkets/ternfs/go/core/crc32c"
 	"github.com/XTXMarkets/ternfs/go/core/log"
 	"github.com/XTXMarkets/ternfs/go/msgs"
 	"io"
@@ -464,8 +467,30 @@ func (s *S3Server) lookupDirEntry(ctx context.Context, rootId msgs.InodeId, path
 	return dirId, lookupResp, nil
 }
 
+func fullObjectCRC32C(spans []client.SpanWithBlockServices, size uint64) (string, error) {
+	var offset uint64
+	var crc uint32
+	for _, span := range spans {
+		h := span.Span.Header
+		if h.ByteOffset != offset || h.Size == 0 || uint64(h.Size) > size-offset {
+			return "", fmt.Errorf("invalid span offset %d size %d, expected offset %d within file size %d",
+				h.ByteOffset, h.Size, offset, size)
+		}
+		offset += uint64(h.Size)
+		crc = crc32c.Append(crc, uint32(h.Crc), int(h.Size))
+	}
+	if offset != size {
+		return "", fmt.Errorf("spans cover %d bytes of file size %d", offset, size)
+	}
+	return base64.StdEncoding.EncodeToString(binary.BigEndian.AppendUint32(nil, crc)), nil
+}
+
 func (s *S3Server) handleGetObject(ctx context.Context, w http.ResponseWriter, r *http.Request, bucket string, rootId msgs.InodeId, path *objectPath) error {
 	s.log.Debug("GetObject: bucket=%s path=%s", bucket, path)
+	mode := strings.Join(r.Header.Values("x-amz-checksum-mode"), ",")
+	if mode != "" && !strings.EqualFold(mode, "ENABLED") {
+		return &S3Error{Code: "InvalidArgument", Message: "Unsupported checksum mode", StatusCode: http.StatusBadRequest}
+	}
 	_, dentry, err := s.lookupDirEntry(ctx, rootId, path)
 	if err != nil {
 		return err // Returns S3Error or internal error
@@ -478,6 +503,8 @@ func (s *S3Server) handleGetObject(ctx context.Context, w http.ResponseWriter, r
 	var lastModified msgs.TernTime
 	var size uint64
 	var bodyReader io.ReadSeeker
+	var checksum string
+	rangeHeader := r.Header.Get("Range")
 
 	if dentry.TargetId.Type() == msgs.DIRECTORY {
 		statResp := &msgs.StatDirectoryResp{}
@@ -491,7 +518,7 @@ func (s *S3Server) handleGetObject(ctx context.Context, w http.ResponseWriter, r
 		if err := s.c.ShardRequest(s.log, dentry.TargetId.Shard(), &msgs.StatFileReq{Id: dentry.TargetId}, statResp); err != nil {
 			return fmt.Errorf("stat failed for file %q: %w", path.String(), err)
 		}
-		fileReader, err := s.c.ReadFile(s.log, s.bufPool, dentry.TargetId)
+		fileReader, spans, err := s.c.ReadFileWithSpans(s.log, s.bufPool, dentry.TargetId)
 		if err != nil {
 			return fmt.Errorf("failed to read contents of file id=%v: %w", dentry.TargetId, err)
 		}
@@ -499,9 +526,14 @@ func (s *S3Server) handleGetObject(ctx context.Context, w http.ResponseWriter, r
 		bodyReader = fileReader
 		size = statResp.Size
 		lastModified = statResp.Mtime
+		if mode != "" && dentry.TargetId.IsFile() && (rangeHeader == "" || r.Method == http.MethodHead) {
+			checksum, err = fullObjectCRC32C(spans, size)
+			if err != nil {
+				return fmt.Errorf("checksum for file id=%v: %w", dentry.TargetId, err)
+			}
+		}
 	}
 
-	rangeHeader := r.Header.Get("Range")
 	w.Header().Set("ETag", FileEtag(dentry.TargetId))
 	w.Header().Set("Last-Modified", lastModified.Time().Format(http.TimeFormat))
 	w.Header().Set("Accept-Ranges", "bytes")
@@ -511,33 +543,37 @@ func (s *S3Server) handleGetObject(ctx context.Context, w http.ResponseWriter, r
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 
-	if rangeHeader == "" {
-		w.Header().Set("Content-Length", strconv.FormatInt(int64(size), 10))
-		w.WriteHeader(http.StatusOK)
-		if r.Method != http.MethodHead {
-			if _, err := io.Copy(w, bodyReader); err != nil {
-				s.log.Info("GetObject: Error writing full response body for object %s: %v", path, err)
-			}
+	status := http.StatusOK
+	length := int64(size)
+	if rangeHeader != "" {
+		start, rangeLength, err := parseRange(rangeHeader, int64(size))
+		if err != nil {
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			return &S3Error{Code: "InvalidRange", Message: "The requested range is not satisfiable", StatusCode: http.StatusRequestedRangeNotSatisfiable}
 		}
+		if _, err := bodyReader.Seek(start, io.SeekStart); err != nil {
+			return fmt.Errorf("failed to seek object: %w", err)
+		}
+		length = rangeLength
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
+		status = http.StatusPartialContent
+	}
+	if checksum != "" {
+		w.Header().Set("x-amz-checksum-crc32c", checksum)
+		w.Header().Set("x-amz-checksum-type", "FULL_OBJECT")
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	w.WriteHeader(status)
+	if r.Method == http.MethodHead {
 		return nil
 	}
-
-	start, length, err := parseRange(rangeHeader, int64(size))
+	if status == http.StatusPartialContent {
+		_, err = io.CopyN(w, bodyReader, length)
+	} else {
+		_, err = io.Copy(w, bodyReader)
+	}
 	if err != nil {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-		return &S3Error{Code: "InvalidRange", Message: "The requested range is not satisfiable", StatusCode: http.StatusRequestedRangeNotSatisfiable}
-	}
-	if _, err := bodyReader.Seek(start, io.SeekStart); err != nil {
-		return fmt.Errorf("failed to seek object: %w", err)
-	}
-
-	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+length-1, size))
-	w.WriteHeader(http.StatusPartialContent)
-	if r.Method != http.MethodHead {
-		if _, err := io.CopyN(w, bodyReader, length); err != nil {
-			s.log.Info("GetObject: Error writing partial response body for object %s: %v", path, err)
-		}
+		s.log.Info("GetObject: Error writing response body for object %s: %v", path, err)
 	}
 	return nil
 }

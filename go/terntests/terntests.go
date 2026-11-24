@@ -367,6 +367,10 @@ func (r *RunTests) run(
 		},
 	)
 
+	r.test(log, "s3 checksum mode", "", func(counters *client.ClientCounters) {
+		s3ChecksumModeTest(log, r.registryAddress(), counters)
+	})
+
 	if r.withNfsMount != nil {
 		r.test(
 			log,
