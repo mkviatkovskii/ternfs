@@ -701,8 +701,23 @@ func (s *S3Server) handlePutObject(ctx context.Context, w http.ResponseWriter, r
 		return &S3Error{Code: "MethodNotAllowed", Message: "PUT is not allowed on a bucket. To create a bucket, use the AWS CLI or other tools.", StatusCode: http.StatusMethodNotAllowed}
 	}
 
+	body, err := newUploadBody(r)
+	if err != nil {
+		return err
+	}
+	isDirectory := path.isDirectory || isDirectoryContentType(r.Header.Get("Content-Type"))
+	if isDirectory {
+		if body == nil && (len(r.TransferEncoding) != 0 || r.ProtoMajor >= 2) {
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				return invalidUpload("Could not read the complete upload body.")
+			}
+		}
+		if err := finishUpload(r, body); err != nil {
+			return err
+		}
+	}
+
 	ownerId := rootId
-	var err error
 
 	// Create parent directories if they don't exist
 	for _, dirName := range path.dir().segments {
@@ -729,7 +744,7 @@ func (s *S3Server) handlePutObject(ctx context.Context, w http.ResponseWriter, r
 
 	var inode msgs.InodeId
 	basename := path.basename()
-	if path.isDirectory || isDirectoryContentType(r.Header.Get("Content-Type")) {
+	if isDirectory {
 		resp := &msgs.MakeDirectoryResp{}
 		if err := s.c.CDCRequest(s.log, &msgs.MakeDirectoryReq{OwnerId: ownerId, Name: basename}, resp); err != nil {
 			// mkdir must be idempotent: clients (e.g. s3fs) re-PUT directory
@@ -755,8 +770,15 @@ func (s *S3Server) handlePutObject(ctx context.Context, w http.ResponseWriter, r
 		}
 		fileId := fileResp.Id
 		cookie := fileResp.Cookie
-		if err := s.c.WriteFile(s.log, s.bufPool, s.dirInfoCache, ownerId, fileId, cookie, r.Body); err != nil {
+		var reader io.Reader = r.Body
+		if body != nil {
+			reader = body
+		}
+		if err := s.c.WriteFile(s.log, s.bufPool, s.dirInfoCache, ownerId, fileId, cookie, reader); err != nil {
 			return fmt.Errorf("failed to write file data: %w", err)
+		}
+		if err := finishUpload(r, body); err != nil {
+			return err
 		}
 		linkReq := &msgs.LinkFileReq{FileId: fileId, Cookie: cookie, OwnerId: ownerId, Name: basename}
 		if err := s.c.ShardRequest(s.log, ownerId.Shard(), linkReq, &msgs.LinkFileResp{}); err != nil {
@@ -766,6 +788,7 @@ func (s *S3Server) handlePutObject(ctx context.Context, w http.ResponseWriter, r
 	}
 
 	w.Header().Set("ETag", FileEtag(inode))
+	body.setResponseHeaders(w.Header())
 	w.WriteHeader(http.StatusOK)
 	return nil
 }

@@ -366,6 +366,9 @@ func (r *RunTests) run(
 			fsTest(log, r.registryAddress(), &fsTestOpts, counters, s3Harness{})
 		},
 	)
+	r.test(log, "s3 checksums", "", func(counters *client.ClientCounters) {
+		s3ChecksumTest(log, r.registryAddress(), counters)
+	})
 
 	if r.withNfsMount != nil {
 		r.test(
